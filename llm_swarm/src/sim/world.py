@@ -43,6 +43,7 @@ class World:
         # Flags.
         self.external_control: bool = False
         self.success: bool = False
+        self.invalid_state: bool = False
 
         # Populated by reset().
         self.obj: TransportObject
@@ -64,6 +65,7 @@ class World:
 
         self.t = 0.0
         self.success = False
+        self.invalid_state = False
         self.obstacles = list(self.config.obstacles)
 
         self._create_cargo()
@@ -151,6 +153,76 @@ class World:
     # Collision helpers
     # ------------------------------------------------------------------
 
+    def _poly_intersects_aabb(
+        self, poly: np.ndarray, rect: tuple[int, int, int, int]
+    ) -> bool:
+        """SAT collision test between an arbitrary polygon and an AABB."""
+        ox, oy, w, h = rect
+        aabb_corners = np.array(
+            [[ox, oy], [ox + w, oy], [ox + w, oy + h], [ox, oy + h]]
+        )
+
+        edges = np.diff(np.vstack([poly, poly[0]]), axis=0)
+        normals = np.column_stack([-edges[:, 1], edges[:, 0]])
+
+        axes = np.vstack(([[1.0, 0.0], [0.0, 1.0]], normals))
+
+        for ax in axes:
+            mag = np.hypot(ax[0], ax[1])
+            if mag < 1e-8:
+                continue
+            ax = ax / mag
+
+            p_aabb = aabb_corners @ ax
+            p_poly = poly @ ax
+
+            if np.max(p_aabb) < np.min(p_poly) or np.max(p_poly) < np.min(p_aabb):
+                return False
+        return True
+
+    def _check_system_collision(
+        self, test_x: float, test_y: float, test_th: float
+    ) -> bool:
+        """
+        Check if the cargo or any robot intersects with an obstacle or boundary.
+        """
+        c, s = np.cos(test_th), np.sin(test_th)
+        rot = np.array([[c, -s], [s, c]])
+
+        # 1. Cargo collision (each part)
+        for lx, ly, w, h in self.obj.parts:
+            corners_local = np.array(
+                [[lx, ly], [lx + w, ly], [lx + w, ly + h], [lx, ly + h]]
+            )
+            corners_world = np.array([test_x, test_y]) + (rot @ corners_local.T).T
+
+            # Boundary check
+            if np.any(corners_world[:, 0] < 0) or np.any(
+                corners_world[:, 0] > self.width
+            ):
+                return True
+            if np.any(corners_world[:, 1] < 0) or np.any(
+                corners_world[:, 1] > self.height
+            ):
+                return True
+
+            # Obstacles
+            for obs in self.obstacles:
+                if self._poly_intersects_aabb(corners_world, obs):
+                    return True
+
+        # 2. Attached Robots
+        for r in self.robots:
+            if not r.attached:
+                continue
+            local = self.obj.attach_points_local[r._attach_idx]
+            ap = np.array([test_x, test_y]) + rot @ local
+            rx, ry = float(ap[0]), float(ap[1])
+            if self._point_in_obstacle(rx, ry, Robot.RADIUS):
+                return True
+
+        return False
+
     def _point_in_obstacle(self, x: float, y: float, radius: float) -> bool:
         """Return True if a circle (x, y, radius) overlaps any obstacle or wall."""
         # World boundary check.
@@ -190,7 +262,12 @@ class World:
 
     def step(self, dt: float) -> None:
         """Advance simulation by one time step."""
-        if self.success:
+        if self.success or getattr(self, "invalid_state", False):
+            return
+
+        # 0. Static Legality Check (Fail-Safe)
+        if self._check_system_collision(self.obj.x, self.obj.y, self.obj.theta):
+            self.invalid_state = True
             return
 
         self.t += dt
@@ -225,7 +302,7 @@ class World:
         dy = tent_vy * dt
         dtheta = tent_omega * dt
 
-        # 3. Check each robot's predicted position - mark blocked if colliding.
+        # 3. Check each robot's predicted position. Mark blocked if colliding locally.
         for r in self.robots:
             if not r.attached:
                 r.blocked = False
@@ -233,7 +310,7 @@ class World:
             px, py = self._predict_robot_pos(r, dx, dy, dtheta)
             r.blocked = self._point_in_obstacle(px, py, Robot.RADIUS)
 
-        # 4. Re-accumulate force from UNBLOCKED robots only.
+        # 4. Re-accumulate intended force from UNBLOCKED robots only.
         net_fx, net_fy, net_torque = 0.0, 0.0, 0.0
         active = 0
         for r in self.robots:
@@ -247,32 +324,62 @@ class World:
             rx, ry = ap[0] - self.obj.x, ap[1] - self.obj.y
             net_torque += rx * fy - ry * fx
 
-        # 5. Integrate object physics with force from unblocked robots only.
+        # 5. Calculate INTENDED next state (Virtual Target)
+        target_vx = self.obj.vx
+        target_vy = self.obj.vy
+        target_omega = self.obj.omega
         if active > 0:
-            self.obj.vx += (net_fx / self.obj.mass) * dt
-            self.obj.vy += (net_fy / self.obj.mass) * dt
-            self.obj.omega += (net_torque / self.obj.inertia) * dt
+            target_vx += (net_fx / self.obj.mass) * dt
+            target_vy += (net_fy / self.obj.mass) * dt
+            target_omega += (net_torque / self.obj.inertia) * dt
 
-        self.obj.vx *= self.obj.linear_damping
-        self.obj.vy *= self.obj.linear_damping
-        self.obj.omega *= self.obj.angular_damping
+        target_vx *= self.obj.linear_damping
+        target_vy *= self.obj.linear_damping
+        target_omega *= self.obj.angular_damping
 
-        self.obj.x += self.obj.vx * dt
-        self.obj.y += self.obj.vy * dt
-        self.obj.theta += self.obj.omega * dt
+        target_dx = target_vx * dt
+        target_dy = target_vy * dt
+        target_dtheta = target_omega * dt
+
+        # 6. Max Feasible Step Clipping (Alpha-Clipping)
+        alpha = 0.0
+        valid_dx, valid_dy, valid_dtheta = 0.0, 0.0, 0.0
+        for a in [1.0, 0.8, 0.5, 0.2, 0.0]:
+            test_x = self.obj.x + target_dx * a
+            test_y = self.obj.y + target_dy * a
+            test_th = self.obj.theta + target_dtheta * a
+
+            # Bound test_th
+            test_th = (test_th + np.pi) % (2 * np.pi) - np.pi
+
+            if not self._check_system_collision(test_x, test_y, test_th):
+                alpha = a
+                valid_dx = target_dx * a
+                valid_dy = target_dy * a
+                valid_dtheta = target_dtheta * a
+                break
+
+        # 7. Apply physics (scaled by alpha to drop velocity if blocked)
+        self.obj.vx = target_vx * alpha
+        self.obj.vy = target_vy * alpha
+        self.obj.omega = target_omega * alpha
+
+        self.obj.x += valid_dx
+        self.obj.y += valid_dy
+        self.obj.theta += valid_dtheta
         self.obj.theta = (self.obj.theta + np.pi) % (2 * np.pi) - np.pi
 
-        # Clamp object inside world bounds.
+        # Clamp object inside world bounds securely
         self.obj.x = np.clip(self.obj.x, 60, self.width - 60)
         self.obj.y = np.clip(self.obj.y, 60, self.height - 60)
 
-        # 6. Snap all attached robots to updated attach points.
+        # 8. Snap all attached robots to securely updated attach points.
         for r in self.robots:
             if r.attached:
                 ap = self.obj.get_attach_point_world(r._attach_idx)
                 r.x, r.y = float(ap[0]), float(ap[1])
                 r.theta = self.obj.theta + r._theta_offset
 
-        # 7. Success check.
+        # 9. Success check.
         if self.obj.reached_goal():
             self.success = True
