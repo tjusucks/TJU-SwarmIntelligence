@@ -341,29 +341,49 @@ class World:
         target_dy = target_vy * dt
         target_dtheta = target_omega * dt
 
-        # 6. Max Feasible Step Clipping (Alpha-Clipping)
-        alpha = 0.0
-        valid_dx, valid_dy, valid_dtheta = 0.0, 0.0, 0.0
-        for a in [1.0, 0.8, 0.5, 0.2, 0.0]:
-            test_x = self.obj.x + target_dx * a
-            test_y = self.obj.y + target_dy * a
-            test_th = self.obj.theta + target_dtheta * a
+        # 6. Sequential DOF Resolution (Allows Sliding and Pivoting)
+        # First, try full combined movement (Optimization)
+        test_th_full = (self.obj.theta + target_dtheta + np.pi) % (2 * np.pi) - np.pi
+        if not self._check_system_collision(
+            self.obj.x + target_dx, self.obj.y + target_dy, test_th_full
+        ):
+            valid_dx = target_dx
+            valid_dy = target_dy
+            valid_dtheta = target_dtheta
+            self.obj.vx = target_vx
+            self.obj.vy = target_vy
+            self.obj.omega = target_omega
+        else:
+            # Fallback: Resolve DOFs sequentially to allow sliding against walls
+            valid_dx, valid_dy, valid_dtheta = 0.0, 0.0, 0.0
+            test_x, test_y, test_th = self.obj.x, self.obj.y, self.obj.theta
 
-            # Bound test_th
-            test_th = (test_th + np.pi) % (2 * np.pi) - np.pi
+            # Test X translation independently
+            if not self._check_system_collision(test_x + target_dx, test_y, test_th):
+                valid_dx = target_dx
+                test_x += target_dx
+                self.obj.vx = target_vx
+            else:
+                self.obj.vx = 0.0  # Kill X momentum only
 
-            if not self._check_system_collision(test_x, test_y, test_th):
-                alpha = a
-                valid_dx = target_dx * a
-                valid_dy = target_dy * a
-                valid_dtheta = target_dtheta * a
-                break
+            # Test Y translation using updated X
+            if not self._check_system_collision(test_x, test_y + target_dy, test_th):
+                valid_dy = target_dy
+                test_y += target_dy
+                self.obj.vy = target_vy
+            else:
+                self.obj.vy = 0.0  # Kill Y momentum only
 
-        # 7. Apply physics (scaled by alpha to drop velocity if blocked)
-        self.obj.vx = target_vx * alpha
-        self.obj.vy = target_vy * alpha
-        self.obj.omega = target_omega * alpha
+            # Test Rotation using updated X and Y
+            test_th_rot = (test_th + target_dtheta + np.pi) % (2 * np.pi) - np.pi
+            if not self._check_system_collision(test_x, test_y, test_th_rot):
+                valid_dtheta = target_dtheta
+                test_th = test_th_rot
+                self.obj.omega = target_omega
+            else:
+                self.obj.omega = 0.0  # Kill angular momentum only
 
+        # 7. Apply physics
         self.obj.x += valid_dx
         self.obj.y += valid_dy
         self.obj.theta += valid_dtheta
