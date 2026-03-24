@@ -180,24 +180,39 @@ class SceneGenerator:
 
         rng = np.random.default_rng(seed)
 
-        cargo_preset = self._pick_cargo(rng)
-        cargo_x, cargo_y = self._random_cargo_pos(rng)
-        goal_x, goal_y = self._random_goal_pos(rng, cargo_x, cargo_y)
-        obstacles = self._random_obstacles(rng)
-        num_robots = self._pick_num_robots(rng)
+        # Rejection sampling loop to ensure valid initial state
+        max_attempts = 100
+        for _ in range(max_attempts):
+            cargo_preset = self._pick_cargo(rng)
+            cargo_x, cargo_y = self._random_cargo_pos(rng)
+            goal_x, goal_y = self._random_goal_pos(rng, cargo_x, cargo_y)
+            obstacles = self._random_obstacles(rng)
+            num_robots = self._pick_num_robots(rng)
 
-        return SceneConfig(
-            seed=seed,
-            width=self.width,
-            height=self.height,
-            cargo_preset=cargo_preset,
-            cargo_x=cargo_x,
-            cargo_y=cargo_y,
-            goal_x=goal_x,
-            goal_y=goal_y,
-            obstacles=obstacles,
-            num_robots=num_robots,
+            if self._is_valid_scene(
+                cargo_preset, cargo_x, cargo_y, goal_x, goal_y, obstacles, num_robots
+            ):
+                return SceneConfig(
+                    seed=seed,
+                    width=self.width,
+                    height=self.height,
+                    cargo_preset=cargo_preset,
+                    cargo_x=cargo_x,
+                    cargo_y=cargo_y,
+                    goal_x=goal_x,
+                    goal_y=goal_y,
+                    obstacles=obstacles,
+                    num_robots=num_robots,
+                )
+
+        import sys
+
+        print(
+            f"[Warning] Failed to generate a valid scene for seed {seed} "
+            f"after {max_attempts} attempts. Using safe default fallback.",
+            file=sys.stderr,
         )
+        return SceneConfig(seed=seed, width=self.width, height=self.height)
 
     # -- Private helpers ----------------------------------------------------
 
@@ -291,3 +306,87 @@ class SceneGenerator:
             obstacles.append((ox, oy, w, h))
 
         return obstacles
+
+    def _is_valid_scene(
+        self,
+        cargo_preset: str,
+        cargo_x: float,
+        cargo_y: float,
+        goal_x: float,
+        goal_y: float,
+        obstacles: list[tuple[int, int, int, int]],
+        num_robots: int,
+    ) -> bool:
+        """
+        Check if the generated scene has any overlapping colliders or bounds violations.
+        """
+        cargo_parts = CARGO_PRESETS[cargo_preset]["parts"]
+        padding = 5.0  # Small safety margin
+
+        # 1. Check Cargo vs Boundaries and Obstacles
+        for lx, ly, w, h in cargo_parts:
+            # AABB of this part in world space (initial rotation is 0)
+            c_left = cargo_x + lx - padding
+            c_right = cargo_x + lx + w + padding
+            c_top = cargo_y + ly - padding
+            c_bottom = cargo_y + ly + h + padding
+
+            # Boundary check
+            if (
+                c_left < 0
+                or c_right > self.width
+                or c_top < 0
+                or c_bottom > self.height
+            ):
+                return False
+
+            # Obstacle check
+            for ox, oy, ow, oh in obstacles:
+                o_left, o_right = ox, ox + ow
+                o_top, o_bottom = oy, oy + oh
+
+                # AABB intersection test
+                if not (
+                    c_right <= o_left
+                    or c_left >= o_right
+                    or c_bottom <= o_top
+                    or c_top >= o_bottom
+                ):
+                    return False
+
+        # 2. Check Attached Robots vs Boundaries and Obstacles
+        attach_points = CARGO_PRESETS[cargo_preset]["attach_points"]
+        n_attach = len(attach_points)
+        robot_radius = 18.0 + 2.0  # Robot.RADIUS + margin
+
+        for i in range(num_robots):
+            idx = i % n_attach
+            rx, ry = attach_points[idx]
+            r_world_x = cargo_x + rx
+            r_world_y = cargo_y + ry
+
+            # Boundary check
+            if (
+                r_world_x - robot_radius < 0
+                or r_world_x + robot_radius > self.width
+                or r_world_y - robot_radius < 0
+                or r_world_y + robot_radius > self.height
+            ):
+                return False
+
+            # Obstacle check (circle vs AABB)
+            for ox, oy, ow, oh in obstacles:
+                cx = max(ox, min(r_world_x, ox + ow))
+                cy = max(oy, min(r_world_y, oy + oh))
+                if np.hypot(r_world_x - cx, r_world_y - cy) < robot_radius:
+                    return False
+
+        # 3. Check Goal vs Obstacles
+        goal_radius = 30.0
+        for ox, oy, ow, oh in obstacles:
+            cx = max(ox, min(goal_x, ox + ow))
+            cy = max(oy, min(goal_y, oy + oh))
+            if np.hypot(goal_x - cx, goal_y - cy) < goal_radius:
+                return False
+
+        return True
