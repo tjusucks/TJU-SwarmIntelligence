@@ -1,27 +1,59 @@
-"""
-Multi-Robot Cooperative Transport Simulation - Entry Point
-Run: python main.py
-Dependencies: pip install pygame numpy
+"""Multi-Robot Cooperative Transport Simulation — Entry Point.
+
+Run:  uv run python -m src.main [--seed SEED] [--level fixed|mild|moderate|full]
 """
 
+from __future__ import annotations
+
+import argparse
 import sys
 
 import pygame
 
 from src.sim.renderer import Renderer
+from src.sim.scene_config import RandomLevel, SceneGenerator
 from src.sim.world import World
 
 FPS = 60
-WINDOW_W, WINDOW_H = 1000, 800
 
 
-def main():
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Multi-Robot Cooperative Transport Simulation.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Scenario seed (default: 42).",
+    )
+    parser.add_argument(
+        "--level",
+        type=str,
+        default="fixed",
+        choices=["fixed", "mild", "moderate", "full"],
+        help="Randomisation level (default: fixed).",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Run the interactive Pygame simulation."""
+    args = parse_args()
+
+    # Generate scene config from seed + level.
+    level = RandomLevel(args.level)
+    generator = SceneGenerator(level=level)
+    config = generator.generate(seed=args.seed)
+    current_seed = args.seed
+
     pygame.init()
-    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+    screen = pygame.display.set_mode((config.width, config.height))
     pygame.display.set_caption("Multi-Robot Cooperative Transport")
     clock = pygame.time.Clock()
 
-    world = World(width=WINDOW_W, height=WINDOW_H)
+    world = World(config=config)
     renderer = Renderer(screen, world)
 
     paused = False
@@ -35,7 +67,13 @@ def main():
                 if event.key == pygame.K_SPACE:
                     paused = not paused
                 if event.key == pygame.K_r:
+                    # Reset with same config.
                     world.reset()
+                if event.key == pygame.K_n:
+                    # New random scene (increment seed).
+                    current_seed += 1
+                    new_config = generator.generate(seed=current_seed)
+                    world.reset(config=new_config)
 
         if not paused:
             world.step(dt=1.0 / FPS)

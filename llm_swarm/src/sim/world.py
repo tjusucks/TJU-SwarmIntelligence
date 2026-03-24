@@ -1,5 +1,4 @@
-"""
-Simulation world: manages robots, object, obstacles, and physics updates
+"""Simulation world: manages robots, object, obstacles, and physics updates.
 
 Physics model: rigid attachment + per-robot collision blocking.
 - Robots are rigidly attached to the object's preset attach points.
@@ -10,73 +9,142 @@ Physics model: rigid attachment + per-robot collision blocking.
   around obstacles driven by whichever robots still have room to push.
 """
 
+from __future__ import annotations
+
 import numpy as np
 
-from src.sim.controller import SimpleController
 from src.sim.robot import Robot
+from src.sim.scene_config import CARGO_PRESETS, SceneConfig
 from src.sim.transport_object import TransportObject
 
-# Obstacle list: (x, y, width, height)
-OBSTACLES = [
-    (150, 100, 30, 200),  # Left vertical wall
-    (300, 300, 200, 30),  # Center horizontal wall
-    (600, 150, 30, 180),  # Right upper wall
-    (500, 500, 150, 30),  # Right lower wall
-    (200, 550, 30, 150),  # Bottom-left vertical wall
-]
-
 ROBOT_COLORS = [
-    (60, 160, 240),  # Blue
-    (60, 200, 120),  # Green
-    (240, 160, 60),  # Orange
-    (200, 80, 200),  # Purple
-    (240, 80, 80),  # Red
-    (80, 200, 200),  # Cyan
+    (60, 160, 240),  # Blue.
+    (60, 200, 120),  # Green.
+    (240, 160, 60),  # Orange.
+    (200, 80, 200),  # Purple.
+    (240, 80, 80),  # Red.
+    (80, 200, 200),  # Cyan.
 ]
 
 
 class World:
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.t = 0.0
+    """Simulation world driven by a ``SceneConfig``.
+
+    Args:
+        config: Scene configuration.  If ``None``, uses default baseline.
+    """
+
+    def __init__(self, config: SceneConfig | None = None) -> None:
+        self.config = config or SceneConfig()
+        self.width = self.config.width
+        self.height = self.config.height
+        self.t: float = 0.0
+
+        # Flags.
+        self.external_control: bool = False
+        self.success: bool = False
+
+        # Populated by reset().
+        self.obj: TransportObject
+        self.robots: list[Robot]
+        self.obstacles: list[tuple[int, int, int, int]]
+
         self.reset()
 
-    def reset(self):
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+
+    def reset(self, config: SceneConfig | None = None) -> None:
+        """Reset the world, optionally with a new config."""
+        if config is not None:
+            self.config = config
+            self.width = config.width
+            self.height = config.height
+
         self.t = 0.0
-
-        # Transport object (placed on the left side)
-        self.obj = TransportObject(x=250, y=420)
-        self.obj.goal_x = 750
-        self.obj.goal_y = 380
-
-        # 4 robots spawned around the object
-        spawn_positions = [
-            (170, 400, 0.0),
-            (250, 330, np.pi / 2),
-            (330, 420, np.pi),
-            (250, 510, -np.pi / 2),
-        ]
-        self.robots = []
-        for i, (x, y, th) in enumerate(spawn_positions):
-            r = Robot(i, x, y, th, color=ROBOT_COLORS[i])
-            self.robots.append(r)
-
-        self.obstacles = OBSTACLES
-        self.controller = SimpleController(self.robots, self.obj, self.obstacles)
-        self._setup_attachments()
         self.success = False
+        self.obstacles = list(self.config.obstacles)
 
-    def _setup_attachments(self):
+        self._create_cargo()
+        self._create_robots()
+        self._setup_attachments()
+
+        # Controller (only used in demo mode, not MARL).
+        if not self.external_control:
+            from src.sim.controller import SimpleController
+
+            self.controller = SimpleController(
+                self.robots,
+                self.obj,
+                self.obstacles,
+            )
+
+    def _create_cargo(self) -> None:
+        """Instantiate the transport object from config."""
+        preset_name = self.config.cargo_preset
+        preset = CARGO_PRESETS[preset_name]
+
+        self.obj = TransportObject(
+            x=self.config.cargo_x,
+            y=self.config.cargo_y,
+            parts=preset["parts"],
+            attach_points=preset["attach_points"],
+            mass=self.config.cargo_mass or preset["mass"],
+            inertia=self.config.cargo_inertia or preset["inertia"],
+            linear_damping=self.config.linear_damping,
+            angular_damping=self.config.angular_damping,
+        )
+        self.obj.goal_x = self.config.goal_x
+        self.obj.goal_y = self.config.goal_y
+
+    def _create_robots(self) -> None:
+        """Spawn robots from config or auto-generate around cargo."""
+        n = self.config.num_robots
+        spawns = self.config.robot_spawns
+
+        if spawns is None:
+            spawns = self._auto_spawn_positions(n)
+
+        self.robots = []
+        for i, (x, y, th) in enumerate(spawns[:n]):
+            color = ROBOT_COLORS[i % len(ROBOT_COLORS)]
+            self.robots.append(Robot(i, x, y, th, color=color))
+
+    def _auto_spawn_positions(
+        self,
+        n: int,
+    ) -> list[tuple[float, float, float]]:
+        """Generate spawn positions evenly around the cargo center."""
+        cx, cy = self.config.cargo_x, self.config.cargo_y
+        radius = 80.0
+        positions = []
+        for i in range(n):
+            angle = 2 * np.pi * i / n - np.pi / 2
+            x = cx + radius * np.cos(angle)
+            y = cy + radius * np.sin(angle)
+            heading = angle + np.pi  # Face toward cargo.
+            positions.append((float(x), float(y), float(heading)))
+        return positions
+
+    def _setup_attachments(self) -> None:
         """Rigidly attach robots to preset attach points on the object."""
-        attach_map = {0: 0, 1: 2, 2: 1, 3: 3}
+        n_attach = len(self.obj.attach_points_local)
+        attach_map = self.config.attach_map
+
+        if attach_map is None:
+            # Default: assign robot i to attach point i (mod available).
+            attach_map = {i: i % n_attach for i in range(len(self.robots))}
+
         for rid, aidx in attach_map.items():
+            if rid >= len(self.robots):
+                continue
             r = self.robots[rid]
             r.attached = True
             r._attach_idx = aidx
             r.blocked = False
             ap = self.obj.get_attach_point_world(aidx)
-            r.x, r.y = ap[0], ap[1]
+            r.x, r.y = float(ap[0]), float(ap[1])
             r._theta_offset = r.theta - self.obj.theta
 
     # ------------------------------------------------------------------
@@ -85,7 +153,7 @@ class World:
 
     def _point_in_obstacle(self, x: float, y: float, radius: float) -> bool:
         """Return True if a circle (x, y, radius) overlaps any obstacle or wall."""
-        # World boundary check
+        # World boundary check.
         if (
             x - radius < 0
             or x + radius > self.width
@@ -93,7 +161,7 @@ class World:
             or y + radius > self.height
         ):
             return True
-        # Obstacle AABB vs circle
+        # Obstacle AABB vs circle.
         for ox, oy, ow, oh in self.obstacles:
             cx = np.clip(x, ox, ox + ow)
             cy = np.clip(y, oy, oy + oh)
@@ -101,32 +169,37 @@ class World:
                 return True
         return False
 
-    def _predict_robot_pos(self, r, delta_x: float, delta_y: float, delta_theta: float):
-        """
-        Predict where robot r would end up if the object moved by
-        (delta_x, delta_y, delta_theta). Returns (px, py).
-        """
+    def _predict_robot_pos(
+        self,
+        r: Robot,
+        delta_x: float,
+        delta_y: float,
+        delta_theta: float,
+    ) -> tuple[float, float]:
+        """Predict where robot r would end up after object displacement."""
         local = self.obj.attach_points_local[r._attach_idx]
         new_theta = self.obj.theta + delta_theta
         c, s = np.cos(new_theta), np.sin(new_theta)
-        R = np.array([[c, -s], [s, c]])
-        ap = np.array([self.obj.x + delta_x, self.obj.y + delta_y]) + R @ local
-        return ap[0], ap[1]
+        rot = np.array([[c, -s], [s, c]])
+        ap = np.array([self.obj.x + delta_x, self.obj.y + delta_y]) + rot @ local
+        return float(ap[0]), float(ap[1])
 
     # ------------------------------------------------------------------
     # Main step
     # ------------------------------------------------------------------
 
-    def step(self, dt: float):
+    def step(self, dt: float) -> None:
+        """Advance simulation by one time step."""
         if self.success:
             return
 
         self.t += dt
 
-        # 1. Controller outputs cmd_fx / cmd_fy per robot
-        self.controller.update(dt)
+        # 1. Controller outputs cmd_fx / cmd_fy per robot.
+        if not self.external_control:
+            self.controller.update(dt)
 
-        # 2. Compute tentative object velocity from ALL robots
+        # 2. Compute tentative object velocity from ALL robots.
         net_fx, net_fy, net_torque = 0.0, 0.0, 0.0
         for r in self.robots:
             if not r.attached:
@@ -152,7 +225,7 @@ class World:
         dy = tent_vy * dt
         dtheta = tent_omega * dt
 
-        # 3. Check each robot's predicted position - mark blocked if colliding
+        # 3. Check each robot's predicted position - mark blocked if colliding.
         for r in self.robots:
             if not r.attached:
                 r.blocked = False
@@ -160,7 +233,7 @@ class World:
             px, py = self._predict_robot_pos(r, dx, dy, dtheta)
             r.blocked = self._point_in_obstacle(px, py, Robot.RADIUS)
 
-        # 4. Re-accumulate force from UNBLOCKED robots only
+        # 4. Re-accumulate force from UNBLOCKED robots only.
         net_fx, net_fy, net_torque = 0.0, 0.0, 0.0
         active = 0
         for r in self.robots:
@@ -174,7 +247,7 @@ class World:
             rx, ry = ap[0] - self.obj.x, ap[1] - self.obj.y
             net_torque += rx * fy - ry * fx
 
-        # 5. Integrate object physics with force from unblocked robots only
+        # 5. Integrate object physics with force from unblocked robots only.
         if active > 0:
             self.obj.vx += (net_fx / self.obj.mass) * dt
             self.obj.vy += (net_fy / self.obj.mass) * dt
@@ -189,17 +262,17 @@ class World:
         self.obj.theta += self.obj.omega * dt
         self.obj.theta = (self.obj.theta + np.pi) % (2 * np.pi) - np.pi
 
-        # Clamp object inside world bounds
+        # Clamp object inside world bounds.
         self.obj.x = np.clip(self.obj.x, 60, self.width - 60)
         self.obj.y = np.clip(self.obj.y, 60, self.height - 60)
 
-        # 6. Snap all attached robots to updated attach points
+        # 6. Snap all attached robots to updated attach points.
         for r in self.robots:
             if r.attached:
                 ap = self.obj.get_attach_point_world(r._attach_idx)
-                r.x, r.y = ap[0], ap[1]
+                r.x, r.y = float(ap[0]), float(ap[1])
                 r.theta = self.obj.theta + r._theta_offset
 
-        # 7. Success check
+        # 7. Success check.
         if self.obj.reached_goal():
             self.success = True
