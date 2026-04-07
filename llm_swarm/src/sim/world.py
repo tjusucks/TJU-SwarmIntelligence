@@ -302,7 +302,7 @@ class World:
         dy = tent_vy * dt
         dtheta = tent_omega * dt
 
-        # 3. Check each robot's predicted position. Mark blocked if colliding locally.
+        # 3. Check each robot's predicted position. Mark blocked for status only.
         for r in self.robots:
             if not r.attached:
                 r.blocked = False
@@ -310,32 +310,12 @@ class World:
             px, py = self._predict_robot_pos(r, dx, dy, dtheta)
             r.blocked = self._point_in_obstacle(px, py, Robot.RADIUS)
 
-        # 4. Re-accumulate intended force from UNBLOCKED robots only.
-        net_fx, net_fy, net_torque = 0.0, 0.0, 0.0
-        active = 0
-        for r in self.robots:
-            if not r.attached or r.blocked:
-                continue
-            active += 1
-            fx, fy = r.cmd_fx, r.cmd_fy
-            net_fx += fx
-            net_fy += fy
-            ap = self.obj.get_attach_point_world(r._attach_idx)
-            rx, ry = ap[0] - self.obj.x, ap[1] - self.obj.y
-            net_torque += rx * fy - ry * fx
-
-        # 5. Calculate INTENDED next state (Virtual Target)
-        target_vx = self.obj.vx
-        target_vy = self.obj.vy
-        target_omega = self.obj.omega
-        if active > 0:
-            target_vx += (net_fx / self.obj.mass) * dt
-            target_vy += (net_fy / self.obj.mass) * dt
-            target_omega += (net_torque / self.obj.inertia) * dt
-
-        target_vx *= self.obj.linear_damping
-        target_vy *= self.obj.linear_damping
-        target_omega *= self.obj.angular_damping
+        # 4. Use all attached robots' force contributions (including blocked ones).
+        # Blocked robots are physically constrained by walls but can still transmit
+        # pushing forces to the rigidly attached object.
+        target_vx = tent_vx
+        target_vy = tent_vy
+        target_omega = tent_omega
 
         target_dx = target_vx * dt
         target_dy = target_vy * dt

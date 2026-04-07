@@ -7,8 +7,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 import pygame
+
+# Support running as a script: python src/main.py
+if __package__ in (None, ""):
+    project_root = str(Path(__file__).resolve().parents[1])
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
 from src.sim.renderer import Renderer
 from src.sim.scene_config import RandomLevel, SceneGenerator
