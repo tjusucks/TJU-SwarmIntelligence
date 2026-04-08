@@ -36,9 +36,9 @@ class TransportParallelEnv(ParallelEnv):
         stuck_move_eps: float = 0.5,
         fixed_num_agents: int | None = 4,
         fixed_cargo_preset: str | None = "L",
-        progress_weight: float = 180.0,
-        step_penalty: float = 0.0,
-        blocked_penalty_weight: float = 0.0,
+        progress_weight: float = 220.0,
+        step_penalty: float = 0.001,
+        blocked_penalty_weight: float = 1.0,
         success_bonus: float = 12.0,
         stuck_penalty: float = 1.0,
         timeout_penalty: float = 0.0,
@@ -46,10 +46,10 @@ class TransportParallelEnv(ParallelEnv):
         away_penalty_weight: float = 0.0,
         heading_reward_weight: float = 0.8,
         action_penalty_weight: float = 0.01,
-        clearance_penalty_weight: float = 2.0,
+        clearance_penalty_weight: float = 0.12,
         clearance_safe_distance: float = 90.0,
-        clearance_penalty_power: float = 2.2,
-        preclearance_penalty_weight: float = 0.4,
+        clearance_penalty_power: float = 1.0,
+        preclearance_penalty_weight: float = 0.04,
         avoid_alert_distance: float = 180.0,
         avoid_blend_gain: float = 0.8,
         avoid_torque_gain: float = 140.0,
@@ -397,6 +397,7 @@ class TransportParallelEnv(ParallelEnv):
         # 3) small stagnation penalty
         # 4) terminal success / failure bonuses
         reward = self.progress_weight * progress
+        reward -= self.step_penalty
         reward -= self.blocked_penalty_weight * blocked_ratio
         if move_dist < self.stuck_move_eps:
             reward -= self.stagnation_penalty_weight
@@ -406,15 +407,13 @@ class TransportParallelEnv(ParallelEnv):
         obs_clearance = self._distance_object_to_obstacle_or_wall()
         if obs_clearance < self.clearance_safe_distance:
             proximity = 1.0 - obs_clearance / max(1e-6, self.clearance_safe_distance)
-            reward -= self.clearance_penalty_weight * (
-                max(0.0, proximity) ** self.clearance_penalty_power
-            )
+            reward -= self.clearance_penalty_weight * max(0.0, proximity)
 
         # Anticipatory shaping: start penalizing when entering an alert band
         # before hard-contact distance, so policy learns earlier avoidance.
         if obs_clearance < self.avoid_alert_distance:
             pre_proximity = 1.0 - obs_clearance / max(1e-6, self.avoid_alert_distance)
-            reward -= self.preclearance_penalty_weight * (max(0.0, pre_proximity) ** 2)
+            reward -= self.preclearance_penalty_weight * max(0.0, pre_proximity)
 
         # Small positive bias for keeping a healthy clearance margin.
         clearance_margin = min(obs_clearance, self.avoid_alert_distance) / max(
