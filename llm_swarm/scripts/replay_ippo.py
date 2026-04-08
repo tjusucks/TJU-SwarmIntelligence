@@ -96,12 +96,16 @@ def main() -> None:
 
     hidden_size = int(cfg.get("hidden_size", 256))
     action_std_init = float(cfg.get("action_std_init", 0.6))
+    log_std_min = float(cfg.get("log_std_min", -1.2))
+    log_std_max = float(cfg.get("log_std_max", 0.8))
 
     model = ActorCritic(
         obs_dim=obs_dim,
         action_dim=action_dim,
         hidden_size=hidden_size,
         action_std_init=action_std_init,
+        log_std_min=log_std_min,
+        log_std_max=log_std_max,
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

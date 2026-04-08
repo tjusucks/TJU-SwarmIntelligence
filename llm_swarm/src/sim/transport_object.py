@@ -41,6 +41,7 @@ class TransportObject:
         self,
         x: float,
         y: float,
+        theta: float = 0.0,
         parts: list[tuple[int, int, int, int]] | None = None,
         attach_points: list[list[float]] | None = None,
         mass: float = 5.0,
@@ -50,7 +51,7 @@ class TransportObject:
     ) -> None:
         self.x = x
         self.y = y
-        self.theta: float = 0.0
+        self.theta: float = float(theta)
 
         self.vx: float = 0.0
         self.vy: float = 0.0

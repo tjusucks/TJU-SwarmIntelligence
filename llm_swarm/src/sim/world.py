@@ -1,12 +1,10 @@
 """Simulation world: manages robots, object, obstacles, and physics updates.
 
-Physics model: rigid attachment + per-robot collision blocking.
+Physics model: rigid attachment + contact-aware force projection.
 - Robots are rigidly attached to the object's preset attach points.
-- Each frame, we predict where each robot would land after the object moves.
-- If a robot's predicted position collides with a wall or world boundary,
-  that robot is marked as BLOCKED and its force contribution is zeroed out.
-- Only unblocked robots contribute force, so the object steers naturally
-  around obstacles driven by whichever robots still have room to push.
+- Each frame predicts robot contacts after candidate object motion.
+- If a robot is blocked, only force components tangential to contact are kept.
+- The object pose update uses coupled line-search scaling on (dx, dy, dtheta).
 """
 
 from __future__ import annotations
@@ -90,6 +88,7 @@ class World:
         self.obj = TransportObject(
             x=self.config.cargo_x,
             y=self.config.cargo_y,
+            theta=self.config.cargo_theta,
             parts=preset["parts"],
             attach_points=preset["attach_points"],
             mass=self.config.cargo_mass or preset["mass"],
@@ -241,6 +240,104 @@ class World:
                 return True
         return False
 
+    def _contact_normal(
+        self,
+        x: float,
+        y: float,
+        fx: float,
+        fy: float,
+        radius: float,
+    ) -> np.ndarray | None:
+        """Estimate aggregated outward contact normal at robot pose.
+
+        Normal points toward free space. The blocking component is opposite
+        to this normal.
+        """
+        normals: list[np.ndarray] = []
+
+        # Boundary contacts.
+        if x - radius < 0:
+            normals.append(np.array([1.0, 0.0]))
+        if x + radius > self.width:
+            normals.append(np.array([-1.0, 0.0]))
+        if y - radius < 0:
+            normals.append(np.array([0.0, 1.0]))
+        if y + radius > self.height:
+            normals.append(np.array([0.0, -1.0]))
+
+        # Obstacle contacts.
+        for ox, oy, ow, oh in self.obstacles:
+            cx = np.clip(x, ox, ox + ow)
+            cy = np.clip(y, oy, oy + oh)
+            dx = x - cx
+            dy = y - cy
+            dist = float(np.hypot(dx, dy))
+            if dist < radius + 2:
+                if dist > 1e-6:
+                    normals.append(np.array([dx / dist, dy / dist]))
+                else:
+                    cmd = np.array([fx, fy], dtype=float)
+                    cmd_norm = float(np.linalg.norm(cmd))
+                    if cmd_norm > 1e-6:
+                        normals.append(-cmd / cmd_norm)
+
+        if len(normals) == 0:
+            return None
+
+        n = np.sum(normals, axis=0)
+        mag = float(np.hypot(n[0], n[1]))
+        if mag < 1e-8:
+            return None
+        return n / mag
+
+    def _project_force_tangent(
+        self,
+        fx: float,
+        fy: float,
+        normal: np.ndarray | None,
+    ) -> tuple[float, float]:
+        """Remove blocking normal component and keep tangential component."""
+        if normal is None:
+            return fx, fy
+
+        f = np.array([fx, fy], dtype=float)
+        dot = float(np.dot(f, normal))
+        # dot < 0 means force pushes into obstacle.
+        if dot < 0.0:
+            f = f - dot * normal
+            # Prevent long wall-hugging slides by damping retained tangential push.
+            f *= 0.45
+        return float(f[0]), float(f[1])
+
+    def _max_collision_free_scale(
+        self,
+        dx: float,
+        dy: float,
+        dtheta: float,
+        iters: int = 10,
+    ) -> float:
+        """Find maximum alpha in [0, 1] such that alpha * motion is collision-free."""
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9 and abs(dtheta) < 1e-9:
+            return 1.0
+
+        lo, hi = 0.0, 1.0
+        th_hi = (self.obj.theta + dtheta + np.pi) % (2 * np.pi) - np.pi
+        if not self._check_system_collision(self.obj.x + dx, self.obj.y + dy, th_hi):
+            return 1.0
+
+        for _ in range(iters):
+            mid = 0.5 * (lo + hi)
+            th_mid = (self.obj.theta + mid * dtheta + np.pi) % (2 * np.pi) - np.pi
+            if not self._check_system_collision(
+                self.obj.x + mid * dx,
+                self.obj.y + mid * dy,
+                th_mid,
+            ):
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
     def _predict_robot_pos(
         self,
         r: Robot,
@@ -276,7 +373,7 @@ class World:
         if not self.external_control:
             self.controller.update(dt)
 
-        # 2. Compute tentative object velocity from ALL robots.
+        # 2. Compute tentative object velocity from commanded forces.
         net_fx, net_fy, net_torque = 0.0, 0.0, 0.0
         for r in self.robots:
             if not r.attached:
@@ -302,66 +399,56 @@ class World:
         dy = tent_vy * dt
         dtheta = tent_omega * dt
 
-        # 3. Check each robot's predicted position. Mark blocked for status only.
+        # 3. Predict contacts and project blocked robot forces onto tangents.
+        effective_forces: dict[int, tuple[float, float]] = {}
         for r in self.robots:
             if not r.attached:
                 r.blocked = False
+                effective_forces[r.id] = (0.0, 0.0)
                 continue
             px, py = self._predict_robot_pos(r, dx, dy, dtheta)
             r.blocked = self._point_in_obstacle(px, py, Robot.RADIUS)
+            if r.blocked:
+                n = self._contact_normal(px, py, r.cmd_fx, r.cmd_fy, Robot.RADIUS)
+                fx_eff, fy_eff = self._project_force_tangent(r.cmd_fx, r.cmd_fy, n)
+            else:
+                fx_eff, fy_eff = r.cmd_fx, r.cmd_fy
+            effective_forces[r.id] = (fx_eff, fy_eff)
 
-        # 4. Use all attached robots' force contributions (including blocked ones).
-        # Blocked robots are physically constrained by walls but can still transmit
-        # pushing forces to the rigidly attached object.
-        target_vx = tent_vx
-        target_vy = tent_vy
-        target_omega = tent_omega
+        # 4. Re-accumulate effective forces with contact-aware projection.
+        net_fx, net_fy, net_torque = 0.0, 0.0, 0.0
+        for r in self.robots:
+            if not r.attached:
+                continue
+            fx, fy = effective_forces.get(r.id, (0.0, 0.0))
+            net_fx += fx
+            net_fy += fy
+            ap = self.obj.get_attach_point_world(r._attach_idx)
+            rx, ry = ap[0] - self.obj.x, ap[1] - self.obj.y
+            net_torque += rx * fy - ry * fx
+
+        target_vx = (
+            self.obj.vx + (net_fx / self.obj.mass) * dt
+        ) * self.obj.linear_damping
+        target_vy = (
+            self.obj.vy + (net_fy / self.obj.mass) * dt
+        ) * self.obj.linear_damping
+        target_omega = (
+            self.obj.omega + (net_torque / self.obj.inertia) * dt
+        ) * self.obj.angular_damping
 
         target_dx = target_vx * dt
         target_dy = target_vy * dt
         target_dtheta = target_omega * dt
 
-        # 6. Sequential DOF Resolution (Allows Sliding and Pivoting)
-        # First, try full combined movement (Optimization)
-        test_th_full = (self.obj.theta + target_dtheta + np.pi) % (2 * np.pi) - np.pi
-        if not self._check_system_collision(
-            self.obj.x + target_dx, self.obj.y + target_dy, test_th_full
-        ):
-            valid_dx = target_dx
-            valid_dy = target_dy
-            valid_dtheta = target_dtheta
-            self.obj.vx = target_vx
-            self.obj.vy = target_vy
-            self.obj.omega = target_omega
-        else:
-            # Fallback: Resolve DOFs sequentially to allow sliding against walls
-            valid_dx, valid_dy, valid_dtheta = 0.0, 0.0, 0.0
-            test_x, test_y, test_th = self.obj.x, self.obj.y, self.obj.theta
-
-            # Test X translation independently
-            if not self._check_system_collision(test_x + target_dx, test_y, test_th):
-                valid_dx = target_dx
-                test_x += target_dx
-                self.obj.vx = target_vx
-            else:
-                self.obj.vx = 0.0  # Kill X momentum only
-
-            # Test Y translation using updated X
-            if not self._check_system_collision(test_x, test_y + target_dy, test_th):
-                valid_dy = target_dy
-                test_y += target_dy
-                self.obj.vy = target_vy
-            else:
-                self.obj.vy = 0.0  # Kill Y momentum only
-
-            # Test Rotation using updated X and Y
-            test_th_rot = (test_th + target_dtheta + np.pi) % (2 * np.pi) - np.pi
-            if not self._check_system_collision(test_x, test_y, test_th_rot):
-                valid_dtheta = target_dtheta
-                test_th = test_th_rot
-                self.obj.omega = target_omega
-            else:
-                self.obj.omega = 0.0  # Kill angular momentum only
+        # 5. Coupled collision resolution by line-search scaling.
+        alpha = self._max_collision_free_scale(target_dx, target_dy, target_dtheta)
+        valid_dx = target_dx * alpha
+        valid_dy = target_dy * alpha
+        valid_dtheta = target_dtheta * alpha
+        self.obj.vx = target_vx * alpha
+        self.obj.vy = target_vy * alpha
+        self.obj.omega = target_omega * alpha
 
         # 7. Apply physics
         self.obj.x += valid_dx
