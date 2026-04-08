@@ -100,6 +100,7 @@ class SceneConfig:
     cargo_preset: str = "L"
     cargo_x: float = 250.0
     cargo_y: float = 420.0
+    cargo_theta: float = 0.0
 
     # -- Goal ---------------------------------------------------------------
     goal_x: float = 750.0
