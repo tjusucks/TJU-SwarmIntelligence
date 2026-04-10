@@ -37,6 +37,12 @@ class World:
         self.width = self.config.width
         self.height = self.config.height
         self.t: float = 0.0
+        self.wall_slide_gain: float = float(
+            np.clip(getattr(self.config, "wall_slide_gain", 0.90), 0.0, 1.0)
+        )
+        self.blocked_normal_force_gain: float = float(
+            np.clip(getattr(self.config, "blocked_normal_force_gain", 0.20), 0.0, 1.0)
+        )
 
         # Flags.
         self.external_control: bool = False
@@ -60,6 +66,12 @@ class World:
             self.config = config
             self.width = config.width
             self.height = config.height
+            self.wall_slide_gain = float(
+                np.clip(getattr(self.config, "wall_slide_gain", 0.90), 0.0, 1.0)
+            )
+            self.blocked_normal_force_gain = float(
+                np.clip(getattr(self.config, "blocked_normal_force_gain", 0.20), 0.0, 1.0)
+            )
 
         self.t = 0.0
         self.success = False
@@ -180,7 +192,11 @@ class World:
         return True
 
     def _check_system_collision(
-        self, test_x: float, test_y: float, test_th: float
+        self,
+        test_x: float,
+        test_y: float,
+        test_th: float,
+        include_robots: bool = True,
     ) -> bool:
         """
         Check if the cargo or any robot intersects with an obstacle or boundary.
@@ -210,7 +226,10 @@ class World:
                 if self._poly_intersects_aabb(corners_world, obs):
                     return True
 
-        # 2. Attached Robots
+        # 2. Attached Robots (optional)
+        if not include_robots:
+            return False
+
         for r in self.robots:
             if not r.attached:
                 continue
@@ -296,7 +315,7 @@ class World:
         fy: float,
         normal: np.ndarray | None,
     ) -> tuple[float, float]:
-        """Remove blocking normal component and keep tangential component."""
+        """Project blocked force: keep tangent and part of normal component."""
         if normal is None:
             return fx, fy
 
@@ -304,9 +323,12 @@ class World:
         dot = float(np.dot(f, normal))
         # dot < 0 means force pushes into obstacle.
         if dot < 0.0:
-            f = f - dot * normal
-            # Prevent long wall-hugging slides by damping retained tangential push.
-            f *= 0.45
+            # Keep a small portion of normal push so blocked robots can still
+            # contribute wrench through rigid attachments instead of going fully dead.
+            remove_ratio = 1.0 - self.blocked_normal_force_gain
+            f = f - (remove_ratio * dot) * normal
+            # Keep tangential component so the system can slide along walls.
+            f *= self.wall_slide_gain
         return float(f[0]), float(f[1])
 
     def _max_collision_free_scale(
@@ -322,7 +344,12 @@ class World:
 
         lo, hi = 0.0, 1.0
         th_hi = (self.obj.theta + dtheta + np.pi) % (2 * np.pi) - np.pi
-        if not self._check_system_collision(self.obj.x + dx, self.obj.y + dy, th_hi):
+        if not self._check_system_collision(
+            self.obj.x + dx,
+            self.obj.y + dy,
+            th_hi,
+            include_robots=False,
+        ):
             return 1.0
 
         for _ in range(iters):
@@ -332,6 +359,7 @@ class World:
                 self.obj.x + mid * dx,
                 self.obj.y + mid * dy,
                 th_mid,
+                include_robots=False,
             ):
                 lo = mid
             else:
@@ -363,7 +391,12 @@ class World:
             return
 
         # 0. Static Legality Check (Fail-Safe)
-        if self._check_system_collision(self.obj.x, self.obj.y, self.obj.theta):
+        if self._check_system_collision(
+            self.obj.x,
+            self.obj.y,
+            self.obj.theta,
+            include_robots=False,
+        ):
             self.invalid_state = True
             return
 

@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     """Parse training arguments."""
     parser = argparse.ArgumentParser(description="Train IPPO for cooperative transport.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--stage", type=str, default="none", choices=["none", "1", "2", "3"])
+    parser.add_argument("--stage", type=str, default="none", choices=["none", "1", "2", "3", "4"])
     parser.add_argument(
         "--level",
         type=str,
@@ -40,9 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-max", type=float, default=500.0)
     parser.add_argument("--stuck-patience", type=int, default=600)
     parser.add_argument("--stuck-move-eps", type=float, default=0.5)
-    parser.add_argument("--progress-weight", type=float, default=220.0)
+    parser.add_argument("--progress-weight", type=float, default=360.0)
     parser.add_argument("--step-penalty", type=float, default=0.001)
-    parser.add_argument("--blocked-penalty-weight", type=float, default=1.0)
+    parser.add_argument("--blocked-penalty-weight", type=float, default=0.45)
+    parser.add_argument("--contact-progress-compensation-weight", type=float, default=0.10)
+    parser.add_argument("--contact-progress-ref", type=float, default=0.0015)
     parser.add_argument("--success-bonus", type=float, default=12.0)
     parser.add_argument("--stuck-penalty", type=float, default=1.0)
     parser.add_argument("--timeout-penalty", type=float, default=0.0)
@@ -50,10 +52,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--away-penalty-weight", type=float, default=0.0)
     parser.add_argument("--heading-reward-weight", type=float, default=0.0)
     parser.add_argument("--action-penalty-weight", type=float, default=0.0)
-    parser.add_argument("--clearance-penalty-weight", type=float, default=0.12)
+    parser.add_argument("--clearance-penalty-weight", type=float, default=0.025)
     parser.add_argument("--clearance-safe-distance", type=float, default=90.0)
     parser.add_argument("--clearance-penalty-power", type=float, default=1.0)
-    parser.add_argument("--preclearance-penalty-weight", type=float, default=0.04)
+    parser.add_argument("--preclearance-penalty-weight", type=float, default=0.0)
     parser.add_argument("--avoid-alert-distance", type=float, default=180.0)
     parser.add_argument("--avoid-blend-gain", type=float, default=0.8)
     parser.add_argument("--avoid-torque-gain", type=float, default=140.0)
@@ -61,15 +63,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--low-speed-penalty-weight", type=float, default=0.0)
     parser.add_argument("--low-speed-threshold", type=float, default=22.0)
     parser.add_argument("--low-speed-far-goal-radius", type=float, default=160.0)
+    parser.add_argument("--jam-penalty-weight", type=float, default=0.12)
+    parser.add_argument("--jam-distance-threshold", type=float, default=110.0)
+    parser.add_argument("--turn-escape-reward-weight", type=float, default=0.25)
     parser.add_argument("--omega-penalty-weight", type=float, default=0.0)
     parser.add_argument("--velocity-penalty-weight", type=float, default=0.0)
-    parser.add_argument("--recovery-push-gain", type=float, default=0.45)
-    parser.add_argument("--recovery-torque-gain", type=float, default=180.0)
-    parser.add_argument("--recovery-stuck-steps", type=int, default=25)
+    parser.add_argument("--recovery-push-gain", type=float, default=0.65)
+    parser.add_argument("--recovery-torque-gain", type=float, default=260.0)
+    parser.add_argument("--recovery-stuck-steps", type=int, default=12)
     parser.add_argument("--unblock-reward-weight", type=float, default=0.25)
     parser.add_argument("--clearance-improve-reward-weight", type=float, default=0.2)
+    parser.add_argument("--milestone-reward", type=float, default=1.5)
+    parser.add_argument("--milestone-radius", type=float, default=70.0)
     parser.add_argument("--near-goal-radius", type=float, default=120.0)
     parser.add_argument("--near-goal-speed-penalty-weight", type=float, default=0.0)
+    parser.add_argument("--wall-slide-gain", type=float, default=0.90)
     parser.add_argument("--route-cell-size", type=int, default=40)
     parser.add_argument("--route-inflate-margin", type=float, default=70.0)
     parser.add_argument("--route-guidance-gain", type=float, default=0.7)
@@ -94,6 +102,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init-theta-max", type=float, default=np.pi)
     parser.add_argument("--stage3-gap-height", type=float, default=200.0)
     parser.add_argument("--stage3-wall-width", type=int, default=42)
+    parser.add_argument("--stage4-gap-span", type=float, default=165.0)
+    parser.add_argument("--stage4-wall-width", type=int, default=34)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--action-std-init", type=float, default=0.35)
@@ -121,8 +131,18 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Only draw one frame every N environment steps for faster playback.",
     )
+    parser.add_argument(
+        "--show-reward-hud",
+        action="store_true",
+        help="Show reward-term breakdown overlay in the Pygame training window.",
+    )
     parser.add_argument("--save-path", type=str, default="checkpoints/ippo_transport.pt")
     parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument(
+        "--show-loss-metrics",
+        action="store_true",
+        help="Show actor/critic/entropy metrics in periodic logs.",
+    )
     return parser.parse_args()
 
 
@@ -131,6 +151,25 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def draw_route_overlay(env: TransportParallelEnv, renderer: Any) -> None:
+    """Draw planned route polyline on top of the scene."""
+    import pygame
+
+    pts = getattr(env, "_route_waypoints", [])
+    if not pts:
+        return
+
+    route_pts = [(int(x), int(y)) for x, y in pts]
+    if len(route_pts) >= 2:
+        pygame.draw.lines(renderer.screen, (80, 235, 255), False, route_pts, 3)
+    elif len(route_pts) == 1:
+        ox, oy = int(env.world.obj.x), int(env.world.obj.y)
+        gx, gy = route_pts[0]
+        pygame.draw.line(renderer.screen, (80, 235, 255), (ox, oy), (gx, gy), 2)
+    for i, (x, y) in enumerate(route_pts[:: max(1, len(route_pts) // 12)]):
+        pygame.draw.circle(renderer.screen, (80, 235, 255), (x, y), 4)
 
 
 def main() -> None:
@@ -153,6 +192,10 @@ def main() -> None:
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True
+    elif args.stage == "4":
+        level_name = "fixed"
+        no_obstacles = False
+        random_init_theta = True
 
     level = RandomLevel(level_name)
 
@@ -168,6 +211,8 @@ def main() -> None:
         progress_weight=args.progress_weight,
         step_penalty=args.step_penalty,
         blocked_penalty_weight=args.blocked_penalty_weight,
+        contact_progress_compensation_weight=args.contact_progress_compensation_weight,
+        contact_progress_ref=args.contact_progress_ref,
         success_bonus=args.success_bonus,
         stuck_penalty=args.stuck_penalty,
         timeout_penalty=args.timeout_penalty,
@@ -186,6 +231,9 @@ def main() -> None:
         low_speed_penalty_weight=args.low_speed_penalty_weight,
         low_speed_threshold=args.low_speed_threshold,
         low_speed_far_goal_radius=args.low_speed_far_goal_radius,
+        jam_penalty_weight=args.jam_penalty_weight,
+        jam_distance_threshold=args.jam_distance_threshold,
+        turn_escape_reward_weight=args.turn_escape_reward_weight,
         omega_penalty_weight=args.omega_penalty_weight,
         velocity_penalty_weight=args.velocity_penalty_weight,
         recovery_push_gain=args.recovery_push_gain,
@@ -195,6 +243,7 @@ def main() -> None:
         clearance_improve_reward_weight=args.clearance_improve_reward_weight,
         near_goal_radius=args.near_goal_radius,
         near_goal_speed_penalty_weight=args.near_goal_speed_penalty_weight,
+        wall_slide_gain=args.wall_slide_gain,
         route_cell_size=args.route_cell_size,
         route_inflate_margin=args.route_inflate_margin,
         route_guidance_gain=args.route_guidance_gain,
@@ -202,6 +251,8 @@ def main() -> None:
         route_waypoint_tolerance=args.route_waypoint_tolerance,
         route_progress_weight=args.route_progress_weight,
         route_deviation_penalty_weight=args.route_deviation_penalty_weight,
+            milestone_reward=args.milestone_reward,
+            milestone_radius=args.milestone_radius,
         action_mode=args.action_mode,
         object_wrench_residual_scale_xy=args.object_wrench_residual_scale_xy,
         object_wrench_residual_scale_tau=args.object_wrench_residual_scale_tau,
@@ -215,6 +266,8 @@ def main() -> None:
         curriculum_stage=args.stage,
         stage3_gap_height=args.stage3_gap_height,
         stage3_wall_width=args.stage3_wall_width,
+        stage4_gap_span=args.stage4_gap_span,
+        stage4_wall_width=args.stage4_wall_width,
     )
 
     agent_order = list(env.possible_agents)
@@ -239,6 +292,7 @@ def main() -> None:
 
     renderer: Any = None
     clock: Any = None
+    hud_font: Any = None
     train_render_enabled = bool(args.render_train)
     render_stride = max(1, int(args.render_steps_per_frame))
     if train_render_enabled:
@@ -251,6 +305,7 @@ def main() -> None:
         pygame.display.set_caption("IPPO Training Replay")
         renderer = Renderer(screen, env.world)
         clock = pygame.time.Clock()
+        hud_font = pygame.font.Font(None, 24)
 
     global_steps = 0
     update_idx = 0
@@ -259,6 +314,9 @@ def main() -> None:
     recent_returns: list[float] = []
     recent_ep_lens: list[int] = []
     total_completed_episodes = 0
+    latest_step_reward = 0.0
+    latest_terms: dict[str, float] = {}
+    term_totals: dict[str, float] = {}
 
     while global_steps < args.total_steps:
         for _ in range(cfg.rollout_steps):
@@ -271,8 +329,15 @@ def main() -> None:
             action_dict = {agent_order[i]: actions[i] for i in range(len(agent_order))}
             next_obs, rewards, terms, truncs, infos = env.step(action_dict)
 
+            reward_batch = np.asarray([rewards[a] for a in agent_order], dtype=np.float32)
+            latest_step_reward = float(np.mean(reward_batch))
+            if infos:
+                latest_terms = dict(infos.get(agent_order[0], {}).get("reward_terms", {}))
+                for k, v in latest_terms.items():
+                    term_totals[k] = term_totals.get(k, 0.0) + float(v)
+
             if train_render_enabled and (global_steps % render_stride == 0):
-                assert renderer is not None and clock is not None
+                assert renderer is not None and clock is not None and hud_font is not None
                 import pygame
 
                 keep_running = True
@@ -282,12 +347,56 @@ def main() -> None:
                         break
                 if keep_running:
                     renderer.draw()
+                    draw_route_overlay(env, renderer)
+
+                    if args.show_reward_hud:
+                        # Overlay training-time reward breakdown HUD.
+                        hud_lines = [
+                            f"update: {update_idx + 1}",
+                            f"step: {global_steps + 1}/{args.total_steps}",
+                            f"episode: {total_completed_episodes + 1}",
+                            f"route_pts: {len(getattr(env, '_route_waypoints', []))}",
+                            f"step_reward: {latest_step_reward:+.4f}",
+                            f"episode_score: {(ep_return + latest_step_reward):+.3f}",
+                        ]
+                        key_order = [
+                            "progress",
+                            "time",
+                            "blocked",
+                            "contact_progress",
+                            "stagnation",
+                            "clearance",
+                            "jam",
+                            "turn_escape",
+                            "milestone",
+                            "unblock",
+                            "clearance_improve",
+                            "success",
+                            "stuck",
+                            "timeout",
+                            "total",
+                        ]
+                        for k in key_order:
+                            if k in latest_terms:
+                                hud_lines.append(
+                                    f"{k}: {float(latest_terms[k]):+.4f}  cum={term_totals.get(k, 0.0):+.3f}"
+                                )
+
+                        line_h = 22
+                        box_w = 390
+                        box_h = 12 + line_h * len(hud_lines)
+                        overlay = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
+                        overlay.fill((0, 0, 0, 150))
+                        renderer.screen.blit(overlay, (8, 8))
+                        for i, txt in enumerate(hud_lines):
+                            s = hud_font.render(txt, True, (245, 245, 245))
+                            renderer.screen.blit(s, (14, 14 + i * line_h))
+
                     pygame.display.flip()
                     clock.tick(max(1, int(args.render_fps)))
                 else:
                     train_render_enabled = False
 
-            reward_batch = np.asarray([rewards[a] for a in agent_order], dtype=np.float32)
             done_batch = np.asarray(
                 [float(terms[a] or truncs[a]) for a in agent_order],
                 dtype=np.float32,
@@ -302,7 +411,7 @@ def main() -> None:
                 dones=done_batch,
             )
 
-            shared_reward = float(np.mean(reward_batch))
+            shared_reward = latest_step_reward
             ep_return += shared_reward
             ep_len += 1
 
@@ -319,6 +428,7 @@ def main() -> None:
                 total_completed_episodes += 1
                 ep_return = 0.0
                 ep_len = 0
+                term_totals = {}
                 observations, _ = env.reset()
             else:
                 observations = next_obs
@@ -339,16 +449,20 @@ def main() -> None:
             avg_return = float(np.mean(recent_returns)) if recent_returns else 0.0
             avg_len = float(np.mean(recent_ep_lens)) if recent_ep_lens else 0.0
             avg_return_per_step = avg_return / max(1.0, avg_len)
-            print(
+            msg = (
                 f"update={update_idx} steps={global_steps} "
                 f"episodes={total_completed_episodes} "
                 f"avg_return_100={avg_return:.3f} "
                 f"avg_len_100={avg_len:.1f} "
-                f"avg_return_per_step_100={avg_return_per_step:.4f} "
-                f"actor_loss={stats['actor_loss']:.4f} "
-                f"critic_loss={stats['critic_loss']:.4f} "
-                f"entropy={stats['entropy']:.4f}"
+                f"avg_return_per_step_100={avg_return_per_step:.4f}"
             )
+            if args.show_loss_metrics:
+                msg += (
+                    f" actor_loss={stats['actor_loss']:.4f}"
+                    f" critic_loss={stats['critic_loss']:.4f}"
+                    f" entropy={stats['entropy']:.4f}"
+                )
+            print(msg)
 
     save_path = Path(args.save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)

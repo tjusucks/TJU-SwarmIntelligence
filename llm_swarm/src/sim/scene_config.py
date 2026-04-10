@@ -121,6 +121,12 @@ class SceneConfig:
     cargo_inertia: float | None = None
     linear_damping: float = 0.85
     angular_damping: float = 0.80
+    # Fraction of tangential force retained when blocked by obstacle/wall.
+    # 1.0 means full wall sliding; smaller values damp sliding.
+    wall_slide_gain: float = 0.90
+    # Fraction of normal (into-contact) force retained when blocked.
+    # 0.0 removes all normal component; >0 keeps some pushing authority.
+    blocked_normal_force_gain: float = 0.20
 
 
 # ---------------------------------------------------------------------------
