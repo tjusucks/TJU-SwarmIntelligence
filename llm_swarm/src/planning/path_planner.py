@@ -31,6 +31,19 @@ def _neighbors(cell: Cell, max_x: int, max_y: int) -> Iterable[Cell]:
             yield nx, ny
 
 
+def _is_corner_cut_blocked(curr: Cell, nxt: Cell, occ: np.ndarray) -> bool:
+    """Return True when a diagonal move would cut through blocked corners."""
+    dx = nxt[0] - curr[0]
+    dy = nxt[1] - curr[1]
+    if abs(dx) != 1 or abs(dy) != 1:
+        return False
+
+    # For diagonal transitions, both axis-adjacent support cells must be free.
+    c1 = (curr[0] + dx, curr[1])
+    c2 = (curr[0], curr[1] + dy)
+    return bool(occ[c1[1], c1[0]] or occ[c2[1], c2[0]])
+
+
 def _closest_free(cell: Cell, occ: np.ndarray) -> Cell:
     if not occ[cell[1], cell[0]]:
         return cell
@@ -129,6 +142,8 @@ def plan_path(
 
         for nb in _neighbors(current, nx, ny):
             if occ[nb[1], nb[0]]:
+                continue
+            if _is_corner_cut_blocked(current, nb, occ):
                 continue
             step_cost = _heuristic(current, nb)
             tentative = g_score[current] + step_cost
