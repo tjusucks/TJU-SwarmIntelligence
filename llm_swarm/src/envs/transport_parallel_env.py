@@ -64,6 +64,12 @@ class TransportParallelEnv(ParallelEnv):
         fail_fast_ineffective_steps: int = 25,
         fail_fast_return_threshold: float = -5000.0,
         fail_fast_penalty: float = 8.0,
+        fail_fast_oscillation_window: int = 60,
+        fail_fast_oscillation_patience: int = 36,
+        fail_fast_oscillation_net_disp_threshold: float = 28.0,
+        fail_fast_oscillation_path_min: float = 260.0,
+        fail_fast_oscillation_min_flip_count: int = 12,
+        fail_fast_oscillation_min_goal_distance: float = 140.0,
         away_penalty_weight: float = 0.0,
         heading_reward_weight: float = 0.8,
         rot_jam_reward_weight: float = 1.5,
@@ -176,6 +182,21 @@ class TransportParallelEnv(ParallelEnv):
         self.fail_fast_ineffective_steps = max(1, int(fail_fast_ineffective_steps))
         self.fail_fast_return_threshold = float(fail_fast_return_threshold)
         self.fail_fast_penalty = max(0.0, float(fail_fast_penalty))
+        self.fail_fast_oscillation_window = max(8, int(fail_fast_oscillation_window))
+        self.fail_fast_oscillation_patience = max(1, int(fail_fast_oscillation_patience))
+        self.fail_fast_oscillation_net_disp_threshold = max(
+            1e-3,
+            float(fail_fast_oscillation_net_disp_threshold),
+        )
+        self.fail_fast_oscillation_path_min = max(0.0, float(fail_fast_oscillation_path_min))
+        self.fail_fast_oscillation_min_flip_count = max(
+            1,
+            int(fail_fast_oscillation_min_flip_count),
+        )
+        self.fail_fast_oscillation_min_goal_distance = max(
+            0.0,
+            float(fail_fast_oscillation_min_goal_distance),
+        )
         self.away_penalty_weight = away_penalty_weight
         self.heading_reward_weight = heading_reward_weight
         self.rot_jam_reward_weight = float(rot_jam_reward_weight)
@@ -250,6 +271,8 @@ class TransportParallelEnv(ParallelEnv):
         self._prev_route_dist: float = 0.0
         self._route_stall_steps: int = 0
         self._route_wall_stuck_steps: int = 0
+        self._hard_stuck_steps: int = 0
+        self._hard_recovery_steps: int = 0
         self._route_replan_count: int = 0
         self._route_replan_cooldown: int = 0
         self._route_plan_shift: int = 0
@@ -270,6 +293,15 @@ class TransportParallelEnv(ParallelEnv):
         self._jam_streak_steps = 0
         self._prev_jammed = False
         self._last_fail_fast_failure = False
+        self._last_fail_fast_reason = "none"
+        self._recent_obj_positions: deque[np.ndarray] = deque(
+            maxlen=self.fail_fast_oscillation_window
+        )
+        self._oscillation_streak_steps = 0
+        self._last_oscillating_in_place = False
+        self._last_oscillation_flip_count = 0
+        self._last_oscillation_path_len = 0.0
+        self._last_oscillation_net_disp = 0.0
         self._last_obj_pos = np.zeros(2, dtype=np.float32)
         self._prev_heading_abs_err = 0.0
         self._prev_obj_theta = 0.0
@@ -380,6 +412,8 @@ class TransportParallelEnv(ParallelEnv):
         self._prev_route_dist = self._distance_to_current_waypoint()
         self._route_stall_steps = 0
         self._route_wall_stuck_steps = 0
+        self._hard_stuck_steps = 0
+        self._hard_recovery_steps = 0
         self._route_replan_count = 0
         self._route_replan_cooldown = 0
         self._route_plan_shift = 0
@@ -393,10 +427,18 @@ class TransportParallelEnv(ParallelEnv):
         self._jam_streak_steps = 0
         self._prev_jammed = False
         self._last_fail_fast_failure = False
+        self._last_fail_fast_reason = "none"
+        self._oscillation_streak_steps = 0
+        self._last_oscillating_in_place = False
+        self._last_oscillation_flip_count = 0
+        self._last_oscillation_path_len = 0.0
+        self._last_oscillation_net_disp = 0.0
         self._last_obj_pos = np.array(
             [self.world.obj.x, self.world.obj.y],
             dtype=np.float32,
         )
+        self._recent_obj_positions.clear()
+        self._recent_obj_positions.append(self._last_obj_pos.copy())
         self._prev_heading_abs_err = self._heading_abs_error()
         self._prev_obj_theta = float(self.world.obj.theta)
         self._prev_blocked_ratio = 0.0
@@ -570,23 +612,91 @@ class TransportParallelEnv(ParallelEnv):
         else:
             self._route_wall_stuck_steps = max(0, self._route_wall_stuck_steps - 1)
 
+        oscillating_now = self._update_oscillation_status(curr_pos=curr_pos, curr_dist=curr_dist)
+
+        # Fast hard-stuck detector: low movement + low route progress while
+        # in contact should trigger a more aggressive reroute+recovery path.
+        hard_blocked_thresh = max(0.05, self.reroute_blocked_ratio_threshold * 0.5)
+        hard_move_eps = max(0.30, self.reroute_move_eps * 0.75)
+        hard_progress_eps = max(0.0, self.reroute_progress_eps * 0.6)
+        hard_stuck_now = bool(
+            blocked_ratio >= hard_blocked_thresh
+            and move_dist <= hard_move_eps
+            and route_progress_raw <= hard_progress_eps
+        )
+        if hard_stuck_now:
+            self._hard_stuck_steps += 1
+        else:
+            self._hard_stuck_steps = max(0, self._hard_stuck_steps - 1)
+
         self._last_route_replanned = False
         self._last_route_replan_reason = "none"
+        hard_replan_steps = max(8, int(self.recovery_stuck_steps))
+        osc_replan_steps = max(6, int(self.fail_fast_oscillation_patience // 3))
+        replan_by_hard_stuck = self._hard_stuck_steps >= hard_replan_steps
+        replan_by_oscillation = bool(
+            oscillating_now and self._oscillation_streak_steps >= osc_replan_steps
+        )
         replan_by_stall = self._route_stall_steps >= self.reroute_stall_steps
         replan_by_wall_stuck = self._route_wall_stuck_steps >= self.reroute_wall_stuck_steps
-        if (replan_by_stall or replan_by_wall_stuck) and self._route_replan_cooldown <= 0:
-            self._last_route_replanned = self._replan_route_from_current()
+        if (
+            replan_by_hard_stuck
+            or replan_by_oscillation
+            or replan_by_stall
+            or replan_by_wall_stuck
+        ) and self._route_replan_cooldown <= 0:
+            if replan_by_hard_stuck or replan_by_oscillation:
+                self._last_route_replanned = self._replan_route_for_stuck()
+            else:
+                self._last_route_replanned = self._replan_route_from_current()
             self._route_stall_steps = 0
             self._route_wall_stuck_steps = 0
+            if replan_by_hard_stuck:
+                self._hard_stuck_steps = 0
+            if replan_by_oscillation:
+                self._oscillation_streak_steps = max(
+                    0,
+                    self._oscillation_streak_steps - max(2, osc_replan_steps // 2),
+                )
             if self._last_route_replanned:
                 self._route_replan_count += 1
-                self._route_replan_cooldown = self.reroute_cooldown_steps
-                if replan_by_wall_stuck:
+                if replan_by_hard_stuck:
+                    self._route_replan_cooldown = max(8, self.reroute_cooldown_steps // 2)
+                    self._last_route_replan_reason = "hard_stuck"
+                    self._hard_recovery_steps = max(
+                        self._hard_recovery_steps,
+                        max(12, int(self.recovery_stuck_steps * 2)),
+                    )
+                    self._escape_burst_steps = max(
+                        self._escape_burst_steps,
+                        max(10, int(self.recovery_stuck_steps)),
+                    )
+                    self._escape_burst_sign *= -1.0
+                elif replan_by_oscillation:
+                    self._route_replan_cooldown = max(6, self.reroute_cooldown_steps // 3)
+                    self._last_route_replan_reason = "oscillation"
+                    self._hard_recovery_steps = max(
+                        self._hard_recovery_steps,
+                        max(8, int(self.recovery_stuck_steps)),
+                    )
+                    self._escape_burst_steps = max(
+                        self._escape_burst_steps,
+                        max(6, int(self.recovery_stuck_steps // 2)),
+                    )
+                elif replan_by_wall_stuck:
+                    self._route_replan_cooldown = self.reroute_cooldown_steps
                     self._last_route_replan_reason = "wall_stuck"
                 elif replan_by_stall:
+                    self._route_replan_cooldown = self.reroute_cooldown_steps
                     self._last_route_replan_reason = "stall"
             else:
                 self._route_replan_cooldown = max(1, self.reroute_cooldown_steps // 2)
+                if replan_by_hard_stuck or replan_by_oscillation:
+                    # Even when reroute fails, keep a short forced escape phase.
+                    self._hard_recovery_steps = max(
+                        self._hard_recovery_steps,
+                        max(8, int(self.recovery_stuck_steps)),
+                    )
 
         stuck_failure = bool(
             self._stuck_steps >= self.stuck_patience
@@ -817,8 +927,16 @@ class TransportParallelEnv(ParallelEnv):
             self._high_blocked_streak_steps = 0
 
         projected_episode_return = float(self._episode_return + reward)
-        fail_fast_failure = bool(projected_episode_return <= self.fail_fast_return_threshold)
+        return_fail_fast = projected_episode_return <= self.fail_fast_return_threshold
+        oscillation_failure = self._oscillation_streak_steps >= self.fail_fast_oscillation_patience
+        fail_fast_failure = bool(return_fail_fast or oscillation_failure)
         self._last_fail_fast_failure = fail_fast_failure
+        if oscillation_failure:
+            self._last_fail_fast_reason = "oscillation"
+        elif return_fail_fast:
+            self._last_fail_fast_reason = "return"
+        else:
+            self._last_fail_fast_reason = "none"
 
         terminated = bool(self.world.success or stuck_failure or fail_fast_failure)
         truncated = bool(self._step_count >= self.max_steps)
@@ -1031,10 +1149,18 @@ class TransportParallelEnv(ParallelEnv):
             "stuck_steps": self._stuck_steps,
             "stuck_failure": stuck_failure,
             "fail_fast_failure": bool(self._last_fail_fast_failure),
+            "fail_fast_reason": self._last_fail_fast_reason,
             "ineffective_streak_steps": self._ineffective_streak_steps,
             "high_blocked_streak_steps": self._high_blocked_streak_steps,
+            "oscillation_streak_steps": self._oscillation_streak_steps,
+            "oscillating_in_place": bool(self._last_oscillating_in_place),
+            "oscillation_path_len": float(self._last_oscillation_path_len),
+            "oscillation_net_disp": float(self._last_oscillation_net_disp),
+            "oscillation_flip_count": int(self._last_oscillation_flip_count),
             "route_stall_steps": self._route_stall_steps,
             "route_wall_stuck_steps": self._route_wall_stuck_steps,
+            "hard_stuck_steps": self._hard_stuck_steps,
+            "hard_recovery_steps": self._hard_recovery_steps,
             "route_replan_count": self._route_replan_count,
             "route_replan_cooldown": self._route_replan_cooldown,
             "route_replanned": bool(self._last_route_replanned),
@@ -1219,6 +1345,127 @@ class TransportParallelEnv(ParallelEnv):
         self._prev_distance = self._path_distance_to_goal()
         return True
 
+    def _clip_point_in_world(
+        self,
+        x: float,
+        y: float,
+        margin: float = 6.0,
+    ) -> tuple[float, float]:
+        cx = float(np.clip(x, margin, self.world.width - margin))
+        cy = float(np.clip(y, margin, self.world.height - margin))
+        return cx, cy
+
+    def _route_path_length(
+        self,
+        start_xy: tuple[float, float],
+        waypoints: list[tuple[float, float]],
+    ) -> float:
+        if len(waypoints) == 0:
+            return 0.0
+
+        prev = np.array([start_xy[0], start_xy[1]], dtype=np.float32)
+        total = 0.0
+        for wx, wy in waypoints:
+            cur = np.array([wx, wy], dtype=np.float32)
+            total += float(np.linalg.norm(cur - prev))
+            prev = cur
+        return float(total)
+
+    def _candidate_replan_starts(self) -> list[tuple[float, float]]:
+        obj = self.world.obj
+        route_dir = self._route_direction_unit()
+        route_norm = float(np.hypot(route_dir[0], route_dir[1]))
+        if route_norm < 1e-8:
+            route_dir = np.array([1.0, 0.0], dtype=np.float32)
+
+        repel_dir, _ = self._nearest_obstacle_repulsion()
+        repel_norm = float(np.hypot(repel_dir[0], repel_dir[1]))
+        if repel_norm < 1e-8:
+            repel_dir = np.zeros(2, dtype=np.float32)
+
+        tangent = np.array([-route_dir[1], route_dir[0]], dtype=np.float32)
+        radius = float(np.clip(self.route_waypoint_tolerance * 1.1, 40.0, 160.0))
+
+        offsets = [
+            np.array([0.0, 0.0], dtype=np.float32),
+            route_dir * radius,
+            -route_dir * (0.85 * radius),
+            tangent * (0.80 * radius),
+            -tangent * (0.80 * radius),
+            (route_dir + tangent) * (0.65 * radius),
+            (route_dir - tangent) * (0.65 * radius),
+        ]
+        if repel_norm >= 1e-8:
+            offsets.extend(
+                [
+                    repel_dir * (0.90 * radius),
+                    -repel_dir * (0.70 * radius),
+                ]
+            )
+
+        out: list[tuple[float, float]] = []
+        seen: set[tuple[int, int]] = set()
+        for off in offsets:
+            sx = float(obj.x + off[0])
+            sy = float(obj.y + off[1])
+            cx, cy = self._clip_point_in_world(sx, sy)
+            key = (int(round(cx)), int(round(cy)))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((cx, cy))
+        return out
+
+    def _replan_route_for_stuck(self) -> bool:
+        """Aggressive reroute for hard jams using multi-start candidates."""
+        obj = self.world.obj
+        goal_xy = (obj.goal_x, obj.goal_y)
+        starts = self._candidate_replan_starts()
+
+        cur_pos = np.array([obj.x, obj.y], dtype=np.float32)
+        old_dir = self._route_direction_unit()
+        old_dir_norm = float(np.hypot(old_dir[0], old_dir[1]))
+
+        best_wps: list[tuple[float, float]] = []
+        best_score = float("inf")
+
+        for idx, start_xy in enumerate(starts):
+            wps = self._plan_route_with_candidates(
+                start_xy=start_xy,
+                goal_xy=goal_xy,
+                shift=self._route_plan_shift + 1 + idx,
+            )
+            if len(wps) < 2:
+                continue
+
+            first_vec = np.array([wps[0][0] - obj.x, wps[0][1] - obj.y], dtype=np.float32)
+            first_dist = float(np.linalg.norm(first_vec))
+            first_align = 0.0
+            if first_dist > 1e-6 and old_dir_norm > 1e-8:
+                first_align = float(np.dot(first_vec / first_dist, old_dir))
+
+            route_len = self._route_path_length((obj.x, obj.y), wps)
+
+            # Prefer routes with meaningful initial direction change and avoid
+            # tiny first segments that tend to trap the controller in corners.
+            score = route_len
+            score += 120.0 * max(0.0, first_align - 0.45)
+            score += 70.0 if first_dist < max(18.0, 0.30 * self.route_waypoint_tolerance) else 0.0
+
+            if score < best_score:
+                best_score = score
+                best_wps = wps
+
+        if len(best_wps) < 2:
+            return False
+
+        self._route_plan_shift += 1
+        self._route_waypoints = best_wps
+        self._route_idx = 0
+        self._prev_route_dist = self._distance_to_current_waypoint()
+        self._prev_distance = self._path_distance_to_goal()
+        return True
+
     def _current_waypoint(self) -> tuple[float, float]:
         if self._route_idx >= len(self._route_waypoints):
             obj = self.world.obj
@@ -1298,13 +1545,25 @@ class TransportParallelEnv(ParallelEnv):
             / max(1, len(self.world.robots))
         )
         repel_dir, obs_clearance = self._nearest_obstacle_repulsion()
+        forced_level = int(self._hard_recovery_steps)
+        forced_escape = forced_level > 0
+        if self._hard_recovery_steps > 0:
+            self._hard_recovery_steps = max(0, self._hard_recovery_steps - 1)
         burst_len = max(10, int(self.recovery_stuck_steps))
-        if self.escape_burst_enabled:
-            if blocked_ratio > 0.0 and self._stuck_steps >= self.recovery_stuck_steps:
+        burst_enabled = self.escape_burst_enabled or forced_escape
+        if burst_enabled:
+            if blocked_ratio > 0.0 and (
+                self._stuck_steps >= self.recovery_stuck_steps or forced_escape
+            ):
                 if self._escape_burst_steps <= 0:
                     self._escape_burst_steps = burst_len
                     self._escape_burst_sign *= -1.0
-            elif blocked_ratio <= 0.0 and self._stuck_steps == 0 and self._escape_burst_steps > 0:
+            elif (
+                blocked_ratio <= 0.0
+                and self._stuck_steps == 0
+                and self._escape_burst_steps > 0
+                and not forced_escape
+            ):
                 self._escape_burst_steps = max(0, self._escape_burst_steps - 2)
         else:
             self._escape_burst_steps = 0
@@ -1316,6 +1575,7 @@ class TransportParallelEnv(ParallelEnv):
             obs_clearance < self.clearance_safe_distance
             or (blocked_ratio > 0.0 and low_mobility)
             or self._stuck_steps >= early_stuck_steps
+            or forced_escape
         )
         if in_recovery and float(np.hypot(repel_dir[0], repel_dir[1])) > 1e-8:
             intensity = 1.0 - obs_clearance / max(1.0, self.clearance_safe_distance)
@@ -1327,6 +1587,12 @@ class TransportParallelEnv(ParallelEnv):
                     1.0,
                 )
             )
+            if forced_escape:
+                intensity = max(0.55, intensity)
+                forced_factor = float(
+                    np.clip(forced_level / max(1.0, float(2 * burst_len)), 0.0, 1.0)
+                )
+                stuck_factor = max(stuck_factor, forced_factor)
             push = self.recovery_push_gain * self.force_max * (
                 0.45 + intensity + 0.35 * stuck_factor + 0.25 * blocked_ratio
             )
@@ -1358,7 +1624,7 @@ class TransportParallelEnv(ParallelEnv):
             # Escape burst mode: when jammed for many steps at a narrow gate,
             # force a short strategy shift (backoff + sweeping lateral motion)
             # to explore a new escape direction.
-            if self.escape_burst_enabled and self._escape_burst_steps > 0:
+            if burst_enabled and self._escape_burst_steps > 0:
                 burst_phase = float(self._escape_burst_steps) / float(max(1, burst_len))
                 n_obs = -repel_dir
                 route_into_obs = float(np.clip(np.dot(route_dir, n_obs), 0.0, 1.0))
@@ -1468,6 +1734,52 @@ class TransportParallelEnv(ParallelEnv):
         pts = np.asarray(self._route_waypoints, dtype=np.float32)
         dists = np.linalg.norm(pts - p, axis=1)
         return float(np.min(dists))
+
+    def _update_oscillation_status(self, curr_pos: np.ndarray, curr_dist: float) -> bool:
+        """Track whether the object is oscillating in place for too long."""
+        self._recent_obj_positions.append(np.asarray(curr_pos, dtype=np.float32).copy())
+
+        oscillating = False
+        flip_count = 0
+        path_len = 0.0
+        net_disp = 0.0
+
+        if (
+            curr_dist >= self.fail_fast_oscillation_min_goal_distance
+            and len(self._recent_obj_positions) >= self.fail_fast_oscillation_window
+        ):
+            pts = np.asarray(self._recent_obj_positions, dtype=np.float32)
+            diffs = pts[1:] - pts[:-1]
+            step_norms = np.linalg.norm(diffs, axis=1)
+            path_len = float(np.sum(step_norms))
+            net_disp = float(np.linalg.norm(pts[-1] - pts[0]))
+
+            prev_u: np.ndarray | None = None
+            for i in range(diffs.shape[0]):
+                nrm = float(step_norms[i])
+                if nrm <= 1e-6:
+                    continue
+                u = diffs[i] / nrm
+                if prev_u is not None and float(np.dot(prev_u, u)) < -0.20:
+                    flip_count += 1
+                prev_u = u
+
+            oscillating = bool(
+                net_disp <= self.fail_fast_oscillation_net_disp_threshold
+                and path_len >= self.fail_fast_oscillation_path_min
+                and flip_count >= self.fail_fast_oscillation_min_flip_count
+            )
+
+        if oscillating:
+            self._oscillation_streak_steps += 1
+        else:
+            self._oscillation_streak_steps = max(0, self._oscillation_streak_steps - 1)
+
+        self._last_oscillating_in_place = bool(oscillating)
+        self._last_oscillation_flip_count = int(flip_count)
+        self._last_oscillation_path_len = float(path_len)
+        self._last_oscillation_net_disp = float(net_disp)
+        return bool(oscillating)
 
     def _milestone_reward(self, curr_pos: np.ndarray) -> float:
         if len(self._milestones) == 0:
