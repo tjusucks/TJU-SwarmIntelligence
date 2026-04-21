@@ -9,6 +9,7 @@ This script is a refactored pipeline for fixed-map experiments:
 from __future__ import annotations
 
 import argparse
+import copy
 import random
 import sys
 from pathlib import Path
@@ -33,8 +34,8 @@ def parse_args() -> argparse.Namespace:
         "--map-mode",
         type=str,
         default="fixed",
-        choices=["fixed", "random_curriculum", "random_level"],
-        help="Map mode: fixed | random curriculum (easy->hard) | random fixed difficulty.",
+        choices=["fixed", "fixed_four", "random_curriculum", "random_level"],
+        help="Map mode: fixed | fixed_four | random curriculum (easy->hard) | random fixed difficulty.",
     )
     parser.add_argument(
         "--random-level",
@@ -149,6 +150,35 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--save-path", type=str, default="checkpoints/marl_fixed_map.pt")
     parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument(
+        "--skip-test",
+        action="store_true",
+        help="Skip post-training test (only applies to --map-mode fixed_four).",
+    )
+    parser.add_argument(
+        "--test-episodes-per-map",
+        type=int,
+        default=6,
+        help="Maximum test attempts per map in fixed_four mode.",
+    )
+    parser.add_argument(
+        "--test-video-dir",
+        type=str,
+        default="artifacts/four_map_test_videos",
+        help="Directory for successful test videos in fixed_four mode.",
+    )
+    parser.add_argument("--test-fps", type=int, default=30)
+    parser.add_argument(
+        "--test-video-frame-stride",
+        type=int,
+        default=2,
+        help="Record one frame every N env steps during test video capture.",
+    )
+    parser.add_argument(
+        "--test-show-window",
+        action="store_true",
+        help="Show a pygame window while testing fixed_four maps.",
+    )
     return parser.parse_args()
 
 
@@ -161,32 +191,379 @@ def set_seed(seed: int) -> None:
 def build_fixed_map_config(cargo_preset: str, num_agents: int) -> SceneConfig:
     """Single fixed map for direct MARL trial.
 
-    The map is intentionally narrow and requires at least one turn.
+    The map is intentionally hard: three staggered narrow gates force
+    repeated up/down routing (S-shape) before reaching the goal.
     """
-    # Two offset narrow gates (both passable):
-    # - Gate 1 at x=320 with opening y in [520, 680]
-    # - Gate 2 at x=620 with opening y in [240, 400]
-    # This enforces at least one turn while keeping start->goal reachable.
+    # Three offset gates (all passable) in zigzag order:
+    # - Gate A at x=280 with opening y in [110, 270]
+    # - Gate B at x=520 with opening y in [500, 660]
+    # - Gate C at x=760 with opening y in [250, 410]
+    # This creates a long S-shaped route and increases deadlock pressure
+    # compared with the old two-gate map, while staying reachable.
     obstacles = [
-        (320, 0, 36, 520),
-        (320, 680, 36, 120),
-        (620, 0, 36, 240),
-        (620, 400, 36, 400),
+        (280, 0, 36, 110),
+        (280, 270, 36, 530),
+        (520, 0, 36, 500),
+        (520, 660, 36, 140),
+        (760, 0, 36, 250),
+        (760, 410, 36, 390),
     ]
     cfg = SceneConfig(
         seed=42,
         width=1000,
         height=800,
         cargo_preset=cargo_preset,
-        cargo_x=160.0,
-        cargo_y=690.0,
+        cargo_x=140.0,
+        cargo_y=700.0,
         cargo_theta=0.0,
-        goal_x=860.0,
-        goal_y=130.0,
+        goal_x=900.0,
+        goal_y=110.0,
         obstacles=obstacles,
         num_robots=int(num_agents),
     )
     return cfg
+
+
+def build_four_fixed_map_configs(
+    cargo_preset: str,
+    num_agents: int,
+) -> list[tuple[str, SceneConfig]]:
+    """Build four fixed maps for cyclic training and testing."""
+
+    map_defs = [
+        {
+            "name": "map1_s_zigzag",
+            "cargo": (140.0, 700.0),
+            "goal": (900.0, 110.0),
+            "obstacles": [
+                (280, 0, 36, 110),
+                (280, 270, 36, 530),
+                (520, 0, 36, 500),
+                (520, 660, 36, 140),
+                (760, 0, 36, 250),
+                (760, 410, 36, 390),
+            ],
+        },
+        {
+            "name": "map2_reverse_s",
+            "cargo": (120.0, 120.0),
+            "goal": (900.0, 700.0),
+            "obstacles": [
+                (260, 0, 36, 520),
+                (260, 690, 36, 110),
+                (500, 0, 36, 180),
+                (500, 340, 36, 460),
+                (740, 0, 36, 470),
+                (740, 630, 36, 170),
+            ],
+        },
+        {
+            "name": "map3_cross_corridor",
+            "cargo": (120.0, 680.0),
+            "goal": (900.0, 120.0),
+            "obstacles": [
+                (0, 220, 700, 34),
+                (860, 220, 140, 34),
+                (0, 540, 120, 34),
+                (280, 540, 720, 34),
+                (520, 0, 34, 300),
+                (520, 460, 34, 340),
+            ],
+        },
+        {
+            "name": "map4_multi_gate",
+            "cargo": (100.0, 700.0),
+            "goal": (940.0, 100.0),
+            "obstacles": [
+                (220, 0, 32, 200),
+                (220, 360, 32, 440),
+                (430, 0, 32, 520),
+                (430, 680, 32, 120),
+                (640, 0, 32, 140),
+                (640, 300, 32, 500),
+                (850, 0, 32, 450),
+                (850, 610, 32, 190),
+            ],
+        },
+    ]
+
+    out: list[tuple[str, SceneConfig]] = []
+    for i, item in enumerate(map_defs):
+        cfg = SceneConfig(
+            seed=42 + i,
+            width=1000,
+            height=800,
+            cargo_preset=cargo_preset,
+            cargo_x=float(item["cargo"][0]),
+            cargo_y=float(item["cargo"][1]),
+            cargo_theta=0.0,
+            goal_x=float(item["goal"][0]),
+            goal_y=float(item["goal"][1]),
+            obstacles=list(item["obstacles"]),
+            num_robots=int(num_agents),
+        )
+        out.append((str(item["name"]), cfg))
+    return out
+
+
+def build_transport_env(
+    args: argparse.Namespace,
+    config: SceneConfig | None,
+    random_level: RandomLevel,
+) -> TransportParallelEnv:
+    """Build env with the same reward/control settings used in training."""
+    return TransportParallelEnv(
+        config=config,
+        random_level=random_level,
+        max_steps=args.max_episode_steps,
+        force_max=args.force_max,
+        fixed_num_agents=args.num_agents,
+        fixed_cargo_preset=args.cargo_preset,
+        progress_weight=args.progress_weight,
+        step_penalty=args.step_penalty,
+        blocked_penalty_weight=args.blocked_penalty_weight,
+        single_contact_penalty=args.single_contact_penalty,
+        persistent_contact_penalty_weight=args.persistent_contact_penalty_weight,
+        contact_ratio_threshold=args.contact_ratio_threshold,
+        ineffective_action_penalty_weight=args.ineffective_action_penalty_weight,
+        ineffective_action_threshold=args.ineffective_action_threshold,
+        ineffective_motion_threshold=args.ineffective_motion_threshold,
+        ineffective_blocked_ratio_threshold=args.ineffective_blocked_ratio_threshold,
+        contact_progress_compensation_weight=args.contact_progress_compensation_weight,
+        contact_progress_ref=args.contact_progress_ref,
+        success_bonus=args.success_bonus,
+        stuck_penalty=args.stuck_penalty,
+        timeout_penalty=args.timeout_penalty,
+        stagnation_penalty_weight=args.stagnation_penalty_weight,
+        stagnation_window=args.stagnation_window,
+        stagnation_progress_threshold=args.stagnation_progress_threshold,
+        heading_reward_weight=args.heading_reward_weight,
+        rot_jam_reward_weight=args.rot_jam_reward_weight,
+        effective_rot_reward=args.effective_rot_reward,
+        effective_rot_theta_threshold=args.effective_rot_theta_threshold,
+        rotation_no_penalty_theta_threshold=args.rotation_no_penalty_theta_threshold,
+        jam_state_motion_threshold=args.jam_state_motion_threshold,
+        jam_penalty_motion_threshold=args.jam_penalty_motion_threshold,
+        action_penalty_weight=args.action_penalty_weight,
+        clearance_penalty_weight=args.clearance_penalty_weight,
+        clearance_safe_distance=args.clearance_safe_distance,
+        milestone_reward=args.milestone_reward,
+        jam_penalty_weight=args.jam_penalty_weight,
+        jam_distance_threshold=args.jam_distance_threshold,
+        turn_escape_reward_weight=args.turn_escape_reward_weight,
+        recovery_push_gain=args.recovery_push_gain,
+        recovery_torque_gain=args.recovery_torque_gain,
+        recovery_stuck_steps=args.recovery_stuck_steps,
+        recover_reward_weight=args.recover_reward_weight,
+        recover_jam_steps=args.recover_jam_steps,
+        fail_fast_low_progress_window=args.fail_fast_low_progress_window,
+        fail_fast_low_progress_threshold=args.fail_fast_low_progress_threshold,
+        fail_fast_high_blocked_steps=args.fail_fast_high_blocked_steps,
+        fail_fast_blocked_ratio_threshold=args.fail_fast_blocked_ratio_threshold,
+        fail_fast_ineffective_steps=args.fail_fast_ineffective_steps,
+        fail_fast_return_threshold=args.fail_fast_return_threshold,
+        fail_fast_penalty=args.fail_fast_penalty,
+        escape_burst_enabled=args.enable_escape_burst,
+        unblock_reward_weight=args.unblock_reward_weight,
+        clearance_improve_reward_weight=args.clearance_improve_reward_weight,
+        action_mode=args.action_mode,
+        object_wrench_residual_scale_xy=args.object_wrench_residual_scale_xy,
+        object_wrench_residual_scale_tau=args.object_wrench_residual_scale_tau,
+        random_init_theta=args.random_init_theta,
+        init_theta_min=args.init_theta_min,
+        init_theta_max=args.init_theta_max,
+    )
+
+
+def policy_mean_actions(trainer: IPPOTrainer, policy_obs: np.ndarray) -> np.ndarray:
+    """Deterministic policy action for evaluation."""
+    obs_t = torch.as_tensor(policy_obs, dtype=torch.float32, device=trainer.device)
+    with torch.no_grad():
+        mean_t, _ = trainer.model.forward(obs_t)
+    return torch.clamp(mean_t, -1.0, 1.0).cpu().numpy()
+
+
+def open_video_writer(
+    out_path: Path,
+    fps: int,
+) -> tuple[Any | None, str | None]:
+    """Open a streaming MP4 writer."""
+    try:
+        import imageio.v2 as imageio
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = imageio.get_writer(
+            str(out_path),
+            fps=max(1, int(fps)),
+            codec="libx264",
+            macro_block_size=1,
+        )
+        return writer, None
+    except Exception as e:
+        return None, str(e)
+
+
+def close_video_writer(writer: Any | None) -> None:
+    if writer is None:
+        return
+    try:
+        writer.close()
+    except Exception:
+        pass
+
+
+def test_fixed_four_maps(
+    args: argparse.Namespace,
+    trainer: IPPOTrainer,
+    fixed_maps: list[tuple[str, SceneConfig]],
+    comm_dim: int,
+) -> None:
+    """Evaluate on four fixed maps and save successful episode videos."""
+    import pygame
+    from src.sim.renderer import Renderer
+
+    if len(fixed_maps) == 0:
+        return
+
+    video_dir = Path(args.test_video_dir)
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    pygame.init()
+    show_window = bool(args.test_show_window)
+    clock: Any = pygame.time.Clock() if show_window else None
+    window: Any = None
+
+    print(
+        f"[Test] Start fixed-four evaluation: maps={len(fixed_maps)} "
+        f"attempts_per_map={args.test_episodes_per_map}"
+    )
+
+    success_count = 0
+    video_count = 0
+
+    for map_idx, (map_name, map_cfg) in enumerate(fixed_maps, start=1):
+        env = build_transport_env(
+            args=args,
+            config=copy.deepcopy(map_cfg),
+            random_level=RandomLevel.FIXED,
+        )
+        agent_order = list(env.possible_agents)
+
+        if show_window:
+            if window is None or window.get_size() != (env.world.width, env.world.height):
+                window = pygame.display.set_mode((env.world.width, env.world.height))
+            pygame.display.set_caption(f"Fixed-Four Test: {map_name}")
+            screen = window
+        else:
+            screen = pygame.Surface((env.world.width, env.world.height))
+        renderer = Renderer(screen, env.world)
+
+        map_success = False
+        saved_path: Path | None = None
+        next_seed = int(args.seed + 10000 + map_idx * 1000)
+        frame_stride = max(1, int(args.test_video_frame_stride))
+        writer_warned = False
+
+        for attempt in range(1, max(1, int(args.test_episodes_per_map)) + 1):
+            env._base_config = copy.deepcopy(map_cfg)
+            observations, _infos, _used_seed, next_seed = reset_reachable(
+                env=env,
+                seed_start=next_seed,
+                max_retries=max(1, int(args.reachability_max_retries)),
+            )
+            comm_state = np.zeros(comm_dim, dtype=np.float32)
+
+            tmp_video = video_dir / f".tmp_{map_idx:02d}_{map_name}_attempt{attempt}.mp4"
+            writer, writer_err = open_video_writer(tmp_video, fps=max(1, int(args.test_fps)))
+            if writer is None and not writer_warned:
+                print(f"[Test] map={map_name} video writer unavailable: {writer_err}")
+                writer_warned = True
+
+            episode_success = False
+            for step_idx in range(int(args.max_episode_steps)):
+                if show_window:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            show_window = False
+
+                policy_obs = build_policy_obs(
+                    observations=observations,
+                    agent_order=agent_order,
+                    comm_mode=args.comm_mode,
+                    comm_state=comm_state,
+                    comm_scale=float(args.comm_scale),
+                )
+                actions = policy_mean_actions(trainer, policy_obs)
+                action_dict = {agent_order[i]: actions[i] for i in range(len(agent_order))}
+
+                observations, rewards, terms, truncs, infos = env.step(action_dict)
+                comm_state = update_comm_state(actions, args.comm_mode)
+
+                renderer.draw()
+                draw_route_overlay(env, renderer)
+                if writer is not None and (step_idx % frame_stride == 0):
+                    frame = np.transpose(pygame.surfarray.array3d(screen), (1, 0, 2)).copy()
+                    try:
+                        writer.append_data(frame)
+                    except Exception as e_append:
+                        close_video_writer(writer)
+                        writer = None
+                        if not writer_warned:
+                            print(f"[Test] map={map_name} video append failed: {e_append}")
+                            writer_warned = True
+
+                if show_window:
+                    pygame.display.flip()
+                    if clock is not None:
+                        clock.tick(max(1, int(args.test_fps)))
+
+                done = bool(all(terms[a] or truncs[a] for a in agent_order))
+                if done:
+                    info0 = infos.get(agent_order[0], {}) if infos else {}
+                    episode_success = bool(info0.get("success", False))
+                    break
+
+            close_video_writer(writer)
+
+            if episode_success:
+                map_success = True
+                out_path = video_dir / f"{map_idx:02d}_{map_name}_success.mp4"
+                if tmp_video.exists():
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    if out_path.exists():
+                        out_path.unlink()
+                    tmp_video.replace(out_path)
+                    saved_path = out_path
+                    print(
+                        f"[Test] map={map_name} success on attempt={attempt}; "
+                        f"video={saved_path}"
+                    )
+                else:
+                    print(
+                        f"[Test] map={map_name} success on attempt={attempt}, "
+                        "but video was not recorded (writer unavailable)."
+                    )
+                break
+
+            if tmp_video.exists():
+                tmp_video.unlink()
+
+        if not map_success:
+            print(f"[Test] map={map_name} failed within {args.test_episodes_per_map} attempts.")
+        elif saved_path is None:
+            print(f"[Test] map={map_name} succeeded but no video file was produced.")
+            success_count += 1
+        else:
+            success_count += 1
+            video_count += 1
+
+        env.close()
+
+    pygame.quit()
+    print(
+        f"[Test] Summary: success_maps={success_count}/{len(fixed_maps)} "
+        f"saved_videos={video_count}/{len(fixed_maps)} dir={video_dir}"
+    )
 
 
 def draw_team_hud(
@@ -302,75 +679,32 @@ def main() -> None:
     set_seed(args.seed)
 
     fixed_cfg = build_fixed_map_config(args.cargo_preset, args.num_agents)
+    fixed_four_maps = build_four_fixed_map_configs(args.cargo_preset, args.num_agents)
+    fixed_four_idx = 0
+
     use_fixed_map = args.map_mode == "fixed"
+    use_fixed_four = args.map_mode == "fixed_four"
     random_level_mode = args.map_mode == "random_level"
-    if use_fixed_map:
+
+    active_cfg: SceneConfig | None
+    if use_fixed_four:
+        active_cfg = copy.deepcopy(fixed_four_maps[fixed_four_idx][1])
+    elif use_fixed_map:
+        active_cfg = fixed_cfg
+    else:
+        active_cfg = None
+
+    if use_fixed_map or use_fixed_four:
         init_level = RandomLevel.FIXED
     elif random_level_mode:
         init_level = RandomLevel(args.random_level)
     else:
         init_level = RandomLevel.MILD
 
-    env = TransportParallelEnv(
-        config=fixed_cfg if use_fixed_map else None,
+    env = build_transport_env(
+        args=args,
+        config=active_cfg,
         random_level=init_level,
-        max_steps=args.max_episode_steps,
-        force_max=args.force_max,
-        fixed_num_agents=args.num_agents,
-        fixed_cargo_preset=args.cargo_preset,
-        progress_weight=args.progress_weight,
-        step_penalty=args.step_penalty,
-        blocked_penalty_weight=args.blocked_penalty_weight,
-        single_contact_penalty=args.single_contact_penalty,
-        persistent_contact_penalty_weight=args.persistent_contact_penalty_weight,
-        contact_ratio_threshold=args.contact_ratio_threshold,
-        ineffective_action_penalty_weight=args.ineffective_action_penalty_weight,
-        ineffective_action_threshold=args.ineffective_action_threshold,
-        ineffective_motion_threshold=args.ineffective_motion_threshold,
-        ineffective_blocked_ratio_threshold=args.ineffective_blocked_ratio_threshold,
-        contact_progress_compensation_weight=args.contact_progress_compensation_weight,
-        contact_progress_ref=args.contact_progress_ref,
-        success_bonus=args.success_bonus,
-        stuck_penalty=args.stuck_penalty,
-        timeout_penalty=args.timeout_penalty,
-        stagnation_penalty_weight=args.stagnation_penalty_weight,
-        stagnation_window=args.stagnation_window,
-        stagnation_progress_threshold=args.stagnation_progress_threshold,
-        heading_reward_weight=args.heading_reward_weight,
-        rot_jam_reward_weight=args.rot_jam_reward_weight,
-        effective_rot_reward=args.effective_rot_reward,
-        effective_rot_theta_threshold=args.effective_rot_theta_threshold,
-        rotation_no_penalty_theta_threshold=args.rotation_no_penalty_theta_threshold,
-        jam_state_motion_threshold=args.jam_state_motion_threshold,
-        jam_penalty_motion_threshold=args.jam_penalty_motion_threshold,
-        action_penalty_weight=args.action_penalty_weight,
-        clearance_penalty_weight=args.clearance_penalty_weight,
-        clearance_safe_distance=args.clearance_safe_distance,
-        milestone_reward=args.milestone_reward,
-        jam_penalty_weight=args.jam_penalty_weight,
-        jam_distance_threshold=args.jam_distance_threshold,
-        turn_escape_reward_weight=args.turn_escape_reward_weight,
-        recovery_push_gain=args.recovery_push_gain,
-        recovery_torque_gain=args.recovery_torque_gain,
-        recovery_stuck_steps=args.recovery_stuck_steps,
-        recover_reward_weight=args.recover_reward_weight,
-        recover_jam_steps=args.recover_jam_steps,
-        fail_fast_low_progress_window=args.fail_fast_low_progress_window,
-        fail_fast_low_progress_threshold=args.fail_fast_low_progress_threshold,
-        fail_fast_high_blocked_steps=args.fail_fast_high_blocked_steps,
-        fail_fast_blocked_ratio_threshold=args.fail_fast_blocked_ratio_threshold,
-        fail_fast_ineffective_steps=args.fail_fast_ineffective_steps,
-        fail_fast_return_threshold=args.fail_fast_return_threshold,
-        fail_fast_penalty=args.fail_fast_penalty,
-        escape_burst_enabled=args.enable_escape_burst,
-        unblock_reward_weight=args.unblock_reward_weight,
-        clearance_improve_reward_weight=args.clearance_improve_reward_weight,
-        action_mode=args.action_mode,
-        object_wrench_residual_scale_xy=args.object_wrench_residual_scale_xy,
-        object_wrench_residual_scale_tau=args.object_wrench_residual_scale_tau,
-        random_init_theta=args.random_init_theta,
-        init_theta_min=args.init_theta_min,
-        init_theta_max=args.init_theta_max,
     )
 
     agent_order = list(env.possible_agents)
@@ -395,20 +729,28 @@ def main() -> None:
 
     next_reset_seed = int(args.seed)
     current_map_level = "fixed"
+    if use_fixed_four:
+        current_map_level = fixed_four_maps[fixed_four_idx][0]
     current_map_seed = int(args.seed)
     current_obstacle_count = 0
-    if not use_fixed_map:
+    if not use_fixed_map and not use_fixed_four:
         if random_level_mode:
             lvl = RandomLevel(args.random_level)
         else:
             lvl = curriculum_level(total_episodes := 0, args.max_scenes)
         set_env_random_level(env, lvl)
         current_map_level = lvl.value
+
+    if use_fixed_four:
+        env._base_config = copy.deepcopy(fixed_four_maps[fixed_four_idx][1])
+
     observations, _infos, current_map_seed, next_reset_seed = reset_reachable(
         env=env,
         seed_start=next_reset_seed,
         max_retries=max(1, int(args.reachability_max_retries)),
     )
+    if use_fixed_four:
+        current_map_seed = fixed_four_idx
     current_obstacle_count = len(getattr(env.world, "obstacles", []))
     comm_state = np.zeros(comm_dim, dtype=np.float32)
 
@@ -488,18 +830,27 @@ def main() -> None:
                 ep_return = 0.0
                 ep_len = 0
                 total_episodes += 1
-                if not use_fixed_map:
+
+                if use_fixed_four:
+                    fixed_four_idx = (fixed_four_idx + 1) % len(fixed_four_maps)
+                    current_map_level = fixed_four_maps[fixed_four_idx][0]
+                    current_map_seed = fixed_four_idx
+                    env._base_config = copy.deepcopy(fixed_four_maps[fixed_four_idx][1])
+                elif not use_fixed_map:
                     if random_level_mode:
                         lvl = RandomLevel(args.random_level)
                     else:
                         lvl = curriculum_level(total_episodes, args.max_scenes)
                     set_env_random_level(env, lvl)
                     current_map_level = lvl.value
+
                 observations, _infos, current_map_seed, next_reset_seed = reset_reachable(
                     env=env,
                     seed_start=next_reset_seed,
                     max_retries=max(1, int(args.reachability_max_retries)),
                 )
+                if use_fixed_four:
+                    current_map_seed = fixed_four_idx
                 current_obstacle_count = len(getattr(env.world, "obstacles", []))
                 comm_state = np.zeros(comm_dim, dtype=np.float32)
                 if args.max_scenes > 0 and total_episodes >= args.max_scenes:
@@ -573,6 +924,17 @@ def main() -> None:
 
     save_path = Path(args.save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
+    fixed_four_payload = [
+        {
+            "name": name,
+            "width": cfg.width,
+            "height": cfg.height,
+            "obstacles": cfg.obstacles,
+            "cargo": [cfg.cargo_x, cfg.cargo_y, cfg.cargo_theta],
+            "goal": [cfg.goal_x, cfg.goal_y],
+        }
+        for name, cfg in fixed_four_maps
+    ]
     torch.save(
         {
             "model": trainer.model.state_dict(),
@@ -593,10 +955,19 @@ def main() -> None:
             }
             if use_fixed_map
             else None,
+            "fixed_maps": fixed_four_payload if use_fixed_four else None,
         },
         save_path,
     )
     print(f"Training complete. Checkpoint saved to: {save_path}")
+
+    if use_fixed_four and not args.skip_test:
+        test_fixed_four_maps(
+            args=args,
+            trainer=trainer,
+            fixed_maps=fixed_four_maps,
+            comm_dim=comm_dim,
+        )
 
     if args.render_train:
         import pygame

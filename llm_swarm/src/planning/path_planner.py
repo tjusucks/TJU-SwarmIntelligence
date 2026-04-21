@@ -86,6 +86,74 @@ def _compress_path(cells: list[Cell]) -> list[Cell]:
     return keep
 
 
+def _line_cells(a: Cell, b: Cell) -> list[Cell]:
+    """Return grid cells traversed by a Bresenham-style line segment."""
+    x0, y0 = a
+    x1, y1 = b
+
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x1 > x0 else -1 if x1 < x0 else 0
+    sy = 1 if y1 > y0 else -1 if y1 < y0 else 0
+
+    x, y = x0, y0
+    out: list[Cell] = [(x, y)]
+
+    if dx >= dy:
+        err = dx / 2.0
+        while x != x1:
+            x += sx
+            err -= dy
+            if err < 0:
+                y += sy
+                err += dx
+            out.append((x, y))
+    else:
+        err = dy / 2.0
+        while y != y1:
+            y += sy
+            err -= dx
+            if err < 0:
+                x += sx
+                err += dy
+            out.append((x, y))
+
+    return out
+
+
+def _segment_is_free(a: Cell, b: Cell, occ: np.ndarray) -> bool:
+    """Check whether a straight grid segment is obstacle-safe."""
+    traversed = _line_cells(a, b)
+    prev = traversed[0]
+    if occ[prev[1], prev[0]]:
+        return False
+
+    for cur in traversed[1:]:
+        if occ[cur[1], cur[0]]:
+            return False
+        if _is_corner_cut_blocked(prev, cur, occ):
+            return False
+        prev = cur
+    return True
+
+
+def _smooth_path(cells: list[Cell], occ: np.ndarray) -> list[Cell]:
+    """Greedily skip intermediate waypoints when straight motion is safe."""
+    if len(cells) <= 2:
+        return cells
+
+    smoothed: list[Cell] = [cells[0]]
+    i = 0
+    while i < len(cells) - 1:
+        j = len(cells) - 1
+        while j > i + 1 and not _segment_is_free(cells[i], cells[j], occ):
+            j -= 1
+        smoothed.append(cells[j])
+        i = j
+
+    return smoothed
+
+
 def plan_path(
     width: int,
     height: int,
@@ -164,6 +232,7 @@ def plan_path(
     cells.reverse()
 
     cells = _compress_path(cells)
+    cells = _smooth_path(cells, occ)
     waypoints = [to_world(c) for c in cells]
 
     if len(waypoints) == 0:
