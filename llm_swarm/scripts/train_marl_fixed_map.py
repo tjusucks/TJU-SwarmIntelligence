@@ -149,6 +149,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--render-steps-per-frame", type=int, default=3)
 
     parser.add_argument("--save-path", type=str, default="checkpoints/marl_fixed_map.pt")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Path to an existing checkpoint (.pt) to resume training from.",
+    )
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument(
         "--skip-test",
@@ -777,6 +783,38 @@ def main() -> None:
     ep_len = 0
     total_episodes = 0
 
+    # Load from checkpoint if --resume is provided
+    if args.resume and Path(args.resume).exists():
+        print(f"Resuming training from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=args.device)
+        trainer.model.load_state_dict(checkpoint["model"])
+        if "optimizer" in checkpoint:
+            trainer.optimizer.load_state_dict(checkpoint["optimizer"])
+        global_steps = checkpoint.get("global_steps", 0)
+        update_idx = checkpoint.get("update_idx", 0)
+        total_episodes = checkpoint.get("total_episodes", checkpoint.get("total_completed_episodes", 0))
+        recent_returns = checkpoint.get("recent_returns", [])
+        recent_lens = checkpoint.get("recent_lens", checkpoint.get("recent_ep_lens", []))
+
+        # Restore curriculum level and configs
+        if use_fixed_four and "fixed_four_idx" in checkpoint:
+            fixed_four_idx = checkpoint["fixed_four_idx"]
+            env._base_config = copy.deepcopy(fixed_four_maps[fixed_four_idx][1])
+            current_map_level = fixed_four_maps[fixed_four_idx][0]
+            current_map_seed = fixed_four_idx
+        elif not use_fixed_map and not use_fixed_four:
+            if random_level_mode:
+                lvl = RandomLevel(args.random_level)
+            else:
+                lvl = curriculum_level(total_episodes, args.max_scenes)
+            set_env_random_level(env, lvl)
+            current_map_level = lvl.value
+
+        print(
+            f"Resumed training at step {global_steps}, update {update_idx}, "
+            f"completed {total_episodes} episodes."
+        )
+
     step_limited = args.total_steps > 0
 
     while True:
@@ -907,6 +945,33 @@ def main() -> None:
         _stats = trainer.update(last_values=last_values)
         update_idx += 1
 
+        # Save periodic checkpoint
+        if update_idx % 50 == 0:
+            checkpoint_path = Path(args.save_path)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "model": trainer.model.state_dict(),
+                    "optimizer": trainer.optimizer.state_dict(),
+                    "config": cfg.__dict__,
+                    "obs_dim": policy_obs_dim,
+                    "base_obs_dim": base_obs_dim,
+                    "action_dim": action_dim,
+                    "comm_mode": args.comm_mode,
+                    "comm_dim": comm_dim,
+                    "map_mode": args.map_mode,
+                    "agent_order": agent_order,
+                    "global_steps": global_steps,
+                    "update_idx": update_idx,
+                    "total_episodes": total_episodes,
+                    "fixed_four_idx": fixed_four_idx,
+                    "recent_returns": recent_returns,
+                    "recent_lens": recent_lens,
+                },
+                checkpoint_path,
+            )
+            print(f"Periodic checkpoint saved to: {checkpoint_path}")
+
         if update_idx % args.log_interval == 0:
             avg_return = float(np.mean(recent_returns)) if recent_returns else 0.0
             avg_len = float(np.mean(recent_lens)) if recent_lens else 0.0
@@ -938,6 +1003,7 @@ def main() -> None:
     torch.save(
         {
             "model": trainer.model.state_dict(),
+            "optimizer": trainer.optimizer.state_dict(),
             "config": cfg.__dict__,
             "obs_dim": policy_obs_dim,
             "base_obs_dim": base_obs_dim,
@@ -946,6 +1012,12 @@ def main() -> None:
             "comm_dim": comm_dim,
             "map_mode": args.map_mode,
             "agent_order": agent_order,
+            "global_steps": global_steps,
+            "update_idx": update_idx,
+            "total_episodes": total_episodes,
+            "fixed_four_idx": fixed_four_idx,
+            "recent_returns": recent_returns,
+            "recent_lens": recent_lens,
             "fixed_map": {
                 "width": fixed_cfg.width,
                 "height": fixed_cfg.height,

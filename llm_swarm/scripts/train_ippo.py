@@ -137,6 +137,12 @@ def parse_args() -> argparse.Namespace:
         help="Show reward-term breakdown overlay in the Pygame training window.",
     )
     parser.add_argument("--save-path", type=str, default="checkpoints/ippo_transport.pt")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Path to an existing checkpoint (.pt) to resume training from.",
+    )
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument(
         "--show-loss-metrics",
@@ -318,6 +324,23 @@ def main() -> None:
     latest_terms: dict[str, float] = {}
     term_totals: dict[str, float] = {}
 
+    # Load from checkpoint if --resume is provided
+    if args.resume and Path(args.resume).exists():
+        print(f"Resuming training from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=args.device)
+        trainer.model.load_state_dict(checkpoint["model"])
+        if "optimizer" in checkpoint:
+            trainer.optimizer.load_state_dict(checkpoint["optimizer"])
+        global_steps = checkpoint.get("global_steps", 0)
+        update_idx = checkpoint.get("update_idx", 0)
+        total_completed_episodes = checkpoint.get("total_completed_episodes", 0)
+        recent_returns = checkpoint.get("recent_returns", [])
+        recent_ep_lens = checkpoint.get("recent_ep_lens", [])
+        print(
+            f"Resumed training at step {global_steps}, update {update_idx}, "
+            f"completed {total_completed_episodes} episodes."
+        )
+
     while global_steps < args.total_steps:
         for _ in range(cfg.rollout_steps):
             if not observations:
@@ -445,6 +468,28 @@ def main() -> None:
         stats = trainer.update(last_values=last_values)
         update_idx += 1
 
+        # Save periodic checkpoint
+        if update_idx % 50 == 0:
+            checkpoint_path = Path(args.save_path)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "model": trainer.model.state_dict(),
+                    "optimizer": trainer.optimizer.state_dict(),
+                    "config": cfg.__dict__,
+                    "obs_dim": obs_dim,
+                    "action_dim": action_dim,
+                    "agent_order": agent_order,
+                    "global_steps": global_steps,
+                    "update_idx": update_idx,
+                    "total_completed_episodes": total_completed_episodes,
+                    "recent_returns": recent_returns,
+                    "recent_ep_lens": recent_ep_lens,
+                },
+                checkpoint_path,
+            )
+            print(f"Periodic checkpoint saved to: {checkpoint_path}")
+
         if update_idx % args.log_interval == 0:
             avg_return = float(np.mean(recent_returns)) if recent_returns else 0.0
             avg_len = float(np.mean(recent_ep_lens)) if recent_ep_lens else 0.0
@@ -469,10 +514,16 @@ def main() -> None:
     torch.save(
         {
             "model": trainer.model.state_dict(),
+            "optimizer": trainer.optimizer.state_dict(),
             "config": cfg.__dict__,
             "obs_dim": obs_dim,
             "action_dim": action_dim,
             "agent_order": agent_order,
+            "global_steps": global_steps,
+            "update_idx": update_idx,
+            "total_completed_episodes": total_completed_episodes,
+            "recent_returns": recent_returns,
+            "recent_ep_lens": recent_ep_lens,
         },
         save_path,
     )
