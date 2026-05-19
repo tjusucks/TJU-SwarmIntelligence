@@ -149,6 +149,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show actor/critic/entropy metrics in periodic logs.",
     )
+    parser.add_argument(
+        "--independent-policy",
+        action="store_true",
+        help="Use independent policies (decentralized) for each agent instead of a shared policy.",
+    )
     return parser.parse_args()
 
 
@@ -292,7 +297,14 @@ def main() -> None:
         max_log_ratio=args.max_log_ratio,
         minibatch_size=args.minibatch_size,
     )
-    trainer = IPPOTrainer(obs_dim=obs_dim, action_dim=action_dim, config=cfg, device=args.device)
+    trainer = IPPOTrainer(
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        config=cfg,
+        device=args.device,
+        agent_ids=agent_order,
+        share_policy=not args.independent_policy,
+    )
 
     observations, _ = env.reset(seed=args.seed)
 
@@ -485,6 +497,7 @@ def main() -> None:
                     "total_completed_episodes": total_completed_episodes,
                     "recent_returns": recent_returns,
                     "recent_ep_lens": recent_ep_lens,
+                    "independent_policy": not trainer.share_policy,
                 },
                 checkpoint_path,
             )
@@ -524,6 +537,7 @@ def main() -> None:
             "total_completed_episodes": total_completed_episodes,
             "recent_returns": recent_returns,
             "recent_ep_lens": recent_ep_lens,
+            "independent_policy": not trainer.share_policy,
         },
         save_path,
     )

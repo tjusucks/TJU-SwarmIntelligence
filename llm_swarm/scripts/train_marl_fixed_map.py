@@ -157,6 +157,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument(
+        "--independent-policy",
+        action="store_true",
+        help="Use independent policies (decentralized) for each agent instead of a shared policy.",
+    )
+    parser.add_argument(
         "--skip-test",
         action="store_true",
         help="Skip post-training test (only applies to --map-mode fixed_four).",
@@ -731,7 +736,14 @@ def main() -> None:
         max_log_ratio=args.max_log_ratio,
         minibatch_size=args.minibatch_size,
     )
-    trainer = IPPOTrainer(obs_dim=policy_obs_dim, action_dim=action_dim, config=cfg, device=args.device)
+    trainer = IPPOTrainer(
+        obs_dim=policy_obs_dim,
+        action_dim=action_dim,
+        config=cfg,
+        device=args.device,
+        agent_ids=agent_order,
+        share_policy=not args.independent_policy,
+    )
 
     next_reset_seed = int(args.seed)
     current_map_level = "fixed"
@@ -967,6 +979,7 @@ def main() -> None:
                     "fixed_four_idx": fixed_four_idx,
                     "recent_returns": recent_returns,
                     "recent_lens": recent_lens,
+                    "independent_policy": not trainer.share_policy,
                 },
                 checkpoint_path,
             )
@@ -1018,6 +1031,7 @@ def main() -> None:
             "fixed_four_idx": fixed_four_idx,
             "recent_returns": recent_returns,
             "recent_lens": recent_lens,
+            "independent_policy": not trainer.share_policy,
             "fixed_map": {
                 "width": fixed_cfg.width,
                 "height": fixed_cfg.height,

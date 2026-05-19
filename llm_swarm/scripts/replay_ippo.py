@@ -16,7 +16,7 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.agents.ippo import ActorCritic
+from src.agents.ippo import ActorCritic, IndependentPolicies
 from src.envs.transport_parallel_env import TransportParallelEnv
 from src.sim.renderer import Renderer
 from src.sim.scene_config import RandomLevel, SceneGenerator
@@ -59,7 +59,7 @@ def set_seed(seed: int) -> None:
 
 
 def policy_actions(
-    model: ActorCritic,
+    model: ActorCritic | IndependentPolicies,
     obs_batch: np.ndarray,
     device: torch.device,
     stochastic: bool,
@@ -99,14 +99,36 @@ def main() -> None:
     log_std_min = float(cfg.get("log_std_min", -1.2))
     log_std_max = float(cfg.get("log_std_max", 0.8))
 
-    model = ActorCritic(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        hidden_size=hidden_size,
-        action_std_init=action_std_init,
-        log_std_min=log_std_min,
-        log_std_max=log_std_max,
-    ).to(device)
+    is_independent = any(k.startswith("models.") for k in checkpoint["model"].keys())
+    if is_independent:
+        if "agent_order" in checkpoint:
+            agent_order = checkpoint["agent_order"]
+        else:
+            agent_ids_set = set()
+            for k in checkpoint["model"].keys():
+                if k.startswith("models."):
+                    parts = k.split(".")
+                    agent_ids_set.add(parts[1])
+            agent_order = sorted(list(agent_ids_set))
+        model = IndependentPolicies(
+            agent_ids=agent_order,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            hidden_size=hidden_size,
+            action_std_init=action_std_init,
+            log_std_min=log_std_min,
+            log_std_max=log_std_max,
+        ).to(device)
+    else:
+        model = ActorCritic(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            hidden_size=hidden_size,
+            action_std_init=action_std_init,
+            log_std_min=log_std_min,
+            log_std_max=log_std_max,
+        ).to(device)
+
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
