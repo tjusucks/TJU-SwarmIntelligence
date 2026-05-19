@@ -28,7 +28,9 @@ from src.sim.scene_config import RandomLevel, SceneConfig
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Refactored MARL training on one fixed map.")
+    parser = argparse.ArgumentParser(
+        description="Refactored MARL training on one fixed map."
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--map-mode",
@@ -51,7 +53,9 @@ def parse_args() -> argparse.Namespace:
         help="Maximum reset retries to find a reachable map.",
     )
     parser.add_argument("--num-agents", type=int, default=4)
-    parser.add_argument("--cargo-preset", type=str, default="L", choices=["L", "T", "U"])
+    parser.add_argument(
+        "--cargo-preset", type=str, default="L", choices=["L", "T", "U"]
+    )
     parser.add_argument(
         "--total-steps",
         type=int,
@@ -72,13 +76,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-penalty", type=float, default=0.001)
     parser.add_argument("--blocked-penalty-weight", type=float, default=0.035)
     parser.add_argument("--single-contact-penalty", type=float, default=0.0)
-    parser.add_argument("--persistent-contact-penalty-weight", type=float, default=0.0015)
+    parser.add_argument(
+        "--persistent-contact-penalty-weight", type=float, default=0.0015
+    )
     parser.add_argument("--contact-ratio-threshold", type=float, default=0.01)
-    parser.add_argument("--ineffective-action-penalty-weight", type=float, default=0.008)
+    parser.add_argument(
+        "--ineffective-action-penalty-weight", type=float, default=0.008
+    )
     parser.add_argument("--ineffective-action-threshold", type=float, default=0.25)
     parser.add_argument("--ineffective-motion-threshold", type=float, default=1.5)
-    parser.add_argument("--ineffective-blocked-ratio-threshold", type=float, default=0.0)
-    parser.add_argument("--contact-progress-compensation-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--ineffective-blocked-ratio-threshold", type=float, default=0.0
+    )
+    parser.add_argument(
+        "--contact-progress-compensation-weight", type=float, default=0.0
+    )
     parser.add_argument("--contact-progress-ref", type=float, default=0.0014)
     parser.add_argument("--success-bonus", type=float, default=20.0)
     parser.add_argument("--stuck-penalty", type=float, default=0.1)
@@ -91,7 +103,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rot-jam-reward-weight", type=float, default=1.5)
     parser.add_argument("--effective-rot-reward", type=float, default=0.8)
     parser.add_argument("--effective-rot-theta-threshold", type=float, default=0.04)
-    parser.add_argument("--rotation-no-penalty-theta-threshold", type=float, default=0.03)
+    parser.add_argument(
+        "--rotation-no-penalty-theta-threshold", type=float, default=0.03
+    )
     parser.add_argument("--jam-state-motion-threshold", type=float, default=1.5)
     parser.add_argument("--jam-penalty-motion-threshold", type=float, default=1.2)
     parser.add_argument("--action-penalty-weight", type=float, default=0.0001)
@@ -122,11 +136,18 @@ def parse_args() -> argparse.Namespace:
         help="Enable heuristic burst escape control. Off by default for policy-driven learning.",
     )
 
-    parser.add_argument("--action-mode", type=str, default="object_wrench", choices=["robot_residual", "object_wrench"])
+    parser.add_argument(
+        "--action-mode",
+        type=str,
+        default="object_wrench",
+        choices=["robot_residual", "object_wrench"],
+    )
     parser.add_argument("--object-wrench-residual-scale-xy", type=float, default=0.5)
     parser.add_argument("--object-wrench-residual-scale-tau", type=float, default=0.5)
 
-    parser.add_argument("--comm-mode", type=str, default="none", choices=["none", "broadcast_action"])
+    parser.add_argument(
+        "--comm-mode", type=str, default="none", choices=["none", "broadcast_action"]
+    )
     parser.add_argument("--comm-scale", type=float, default=1.0)
 
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -143,12 +164,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-init-theta", action="store_true")
     parser.add_argument("--init-theta-min", type=float, default=-np.pi)
     parser.add_argument("--init-theta-max", type=float, default=np.pi)
+    parser.add_argument("--goal-orientation-matching", action="store_true")
+    parser.add_argument("--goal-angle-tolerance", type=float, default=0.2)
+    parser.add_argument("--goal-heading-reward-weight", type=float, default=0.5)
+    parser.add_argument("--random-goal-theta", action="store_true")
 
     parser.add_argument("--render-train", action="store_true")
     parser.add_argument("--render-fps", type=int, default=120)
     parser.add_argument("--render-steps-per-frame", type=int, default=3)
 
-    parser.add_argument("--save-path", type=str, default="checkpoints/marl_fixed_map.pt")
+    parser.add_argument(
+        "--save-path", type=str, default="checkpoints/marl_fixed_map.pt"
+    )
     parser.add_argument(
         "--resume",
         type=str,
@@ -383,6 +410,10 @@ def build_transport_env(
         random_init_theta=args.random_init_theta,
         init_theta_min=args.init_theta_min,
         init_theta_max=args.init_theta_max,
+        goal_orientation_matching=args.goal_orientation_matching,
+        goal_angle_tolerance=args.goal_angle_tolerance,
+        goal_heading_reward_weight=args.goal_heading_reward_weight,
+        random_goal_theta=args.random_goal_theta,
     )
 
 
@@ -431,6 +462,7 @@ def test_fixed_four_maps(
 ) -> None:
     """Evaluate on four fixed maps and save successful episode videos."""
     import pygame
+
     from src.sim.renderer import Renderer
 
     if len(fixed_maps) == 0:
@@ -461,7 +493,10 @@ def test_fixed_four_maps(
         agent_order = list(env.possible_agents)
 
         if show_window:
-            if window is None or window.get_size() != (env.world.width, env.world.height):
+            if window is None or window.get_size() != (
+                env.world.width,
+                env.world.height,
+            ):
                 window = pygame.display.set_mode((env.world.width, env.world.height))
             pygame.display.set_caption(f"Fixed-Four Test: {map_name}")
             screen = window
@@ -484,8 +519,12 @@ def test_fixed_four_maps(
             )
             comm_state = np.zeros(comm_dim, dtype=np.float32)
 
-            tmp_video = video_dir / f".tmp_{map_idx:02d}_{map_name}_attempt{attempt}.mp4"
-            writer, writer_err = open_video_writer(tmp_video, fps=max(1, int(args.test_fps)))
+            tmp_video = (
+                video_dir / f".tmp_{map_idx:02d}_{map_name}_attempt{attempt}.mp4"
+            )
+            writer, writer_err = open_video_writer(
+                tmp_video, fps=max(1, int(args.test_fps))
+            )
             if writer is None and not writer_warned:
                 print(f"[Test] map={map_name} video writer unavailable: {writer_err}")
                 writer_warned = True
@@ -505,7 +544,9 @@ def test_fixed_four_maps(
                     comm_scale=float(args.comm_scale),
                 )
                 actions = policy_mean_actions(trainer, policy_obs)
-                action_dict = {agent_order[i]: actions[i] for i in range(len(agent_order))}
+                action_dict = {
+                    agent_order[i]: actions[i] for i in range(len(agent_order))
+                }
 
                 observations, rewards, terms, truncs, infos = env.step(action_dict)
                 comm_state = update_comm_state(actions, args.comm_mode)
@@ -513,14 +554,18 @@ def test_fixed_four_maps(
                 renderer.draw()
                 draw_route_overlay(env, renderer)
                 if writer is not None and (step_idx % frame_stride == 0):
-                    frame = np.transpose(pygame.surfarray.array3d(screen), (1, 0, 2)).copy()
+                    frame = np.transpose(
+                        pygame.surfarray.array3d(screen), (1, 0, 2)
+                    ).copy()
                     try:
                         writer.append_data(frame)
                     except Exception as e_append:
                         close_video_writer(writer)
                         writer = None
                         if not writer_warned:
-                            print(f"[Test] map={map_name} video append failed: {e_append}")
+                            print(
+                                f"[Test] map={map_name} video append failed: {e_append}"
+                            )
                             writer_warned = True
 
                 if show_window:
@@ -560,7 +605,9 @@ def test_fixed_four_maps(
                 tmp_video.unlink()
 
         if not map_success:
-            print(f"[Test] map={map_name} failed within {args.test_episodes_per_map} attempts.")
+            print(
+                f"[Test] map={map_name} failed within {args.test_episodes_per_map} attempts."
+            )
         elif saved_path is None:
             print(f"[Test] map={map_name} succeeded but no video file was produced.")
             success_count += 1
@@ -593,7 +640,7 @@ def draw_team_hud(
     total_steps_text = "inf" if total_steps <= 0 else str(total_steps)
 
     lines = [
-        f"fixed-map MARL",
+        "fixed-map MARL",
         f"step: {global_steps}/{total_steps_text}",
         f"episode_score: {ep_score:+.3f}",
         f"comm_mode: {comm_mode}",
@@ -778,6 +825,7 @@ def main() -> None:
     render_stride = max(1, int(args.render_steps_per_frame))
     if args.render_train:
         import pygame
+
         from src.sim.renderer import Renderer
 
         pygame.init()
@@ -804,9 +852,13 @@ def main() -> None:
             trainer.optimizer.load_state_dict(checkpoint["optimizer"])
         global_steps = checkpoint.get("global_steps", 0)
         update_idx = checkpoint.get("update_idx", 0)
-        total_episodes = checkpoint.get("total_episodes", checkpoint.get("total_completed_episodes", 0))
+        total_episodes = checkpoint.get(
+            "total_episodes", checkpoint.get("total_completed_episodes", 0)
+        )
         recent_returns = checkpoint.get("recent_returns", [])
-        recent_lens = checkpoint.get("recent_lens", checkpoint.get("recent_ep_lens", []))
+        recent_lens = checkpoint.get(
+            "recent_lens", checkpoint.get("recent_ep_lens", [])
+        )
 
         # Restore curriculum level and configs
         if use_fixed_four and "fixed_four_idx" in checkpoint:
@@ -850,8 +902,12 @@ def main() -> None:
             action_dict = {agent_order[i]: actions[i] for i in range(len(agent_order))}
 
             next_obs, rewards, terms, truncs, _infos = env.step(action_dict)
-            reward_batch = np.asarray([rewards[a] for a in agent_order], dtype=np.float32)
-            done_batch = np.asarray([float(terms[a] or truncs[a]) for a in agent_order], dtype=np.float32)
+            reward_batch = np.asarray(
+                [rewards[a] for a in agent_order], dtype=np.float32
+            )
+            done_batch = np.asarray(
+                [float(terms[a] or truncs[a]) for a in agent_order], dtype=np.float32
+            )
 
             trainer.buffer.add(
                 obs=policy_obs,
@@ -894,10 +950,12 @@ def main() -> None:
                     set_env_random_level(env, lvl)
                     current_map_level = lvl.value
 
-                observations, _infos, current_map_seed, next_reset_seed = reset_reachable(
-                    env=env,
-                    seed_start=next_reset_seed,
-                    max_retries=max(1, int(args.reachability_max_retries)),
+                observations, _infos, current_map_seed, next_reset_seed = (
+                    reset_reachable(
+                        env=env,
+                        seed_start=next_reset_seed,
+                        max_retries=max(1, int(args.reachability_max_retries)),
+                    )
                 )
                 if use_fixed_four:
                     current_map_seed = fixed_four_idx
@@ -908,7 +966,12 @@ def main() -> None:
             else:
                 observations = next_obs
 
-            if args.render_train and renderer is not None and clock is not None and hud_font is not None:
+            if (
+                args.render_train
+                and renderer is not None
+                and clock is not None
+                and hud_font is not None
+            ):
                 if global_steps % render_stride == 0:
                     import pygame
 
@@ -980,6 +1043,9 @@ def main() -> None:
                     "recent_returns": recent_returns,
                     "recent_lens": recent_lens,
                     "independent_policy": not trainer.share_policy,
+                    "goal_orientation_matching": args.goal_orientation_matching,
+                    "goal_angle_tolerance": args.goal_angle_tolerance,
+                    "random_goal_theta": args.random_goal_theta,
                 },
                 checkpoint_path,
             )
@@ -1032,15 +1098,24 @@ def main() -> None:
             "recent_returns": recent_returns,
             "recent_lens": recent_lens,
             "independent_policy": not trainer.share_policy,
-            "fixed_map": {
-                "width": fixed_cfg.width,
-                "height": fixed_cfg.height,
-                "obstacles": fixed_cfg.obstacles,
-                "cargo": [fixed_cfg.cargo_x, fixed_cfg.cargo_y, fixed_cfg.cargo_theta],
-                "goal": [fixed_cfg.goal_x, fixed_cfg.goal_y],
-            }
-            if use_fixed_map
-            else None,
+            "goal_orientation_matching": args.goal_orientation_matching,
+            "goal_angle_tolerance": args.goal_angle_tolerance,
+            "random_goal_theta": args.random_goal_theta,
+            "fixed_map": (
+                {
+                    "width": fixed_cfg.width,
+                    "height": fixed_cfg.height,
+                    "obstacles": fixed_cfg.obstacles,
+                    "cargo": [
+                        fixed_cfg.cargo_x,
+                        fixed_cfg.cargo_y,
+                        fixed_cfg.cargo_theta,
+                    ],
+                    "goal": [fixed_cfg.goal_x, fixed_cfg.goal_y],
+                }
+                if use_fixed_map
+                else None
+            ),
             "fixed_maps": fixed_four_payload if use_fixed_four else None,
         },
         save_path,

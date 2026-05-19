@@ -43,6 +43,9 @@ class World:
         self.blocked_normal_force_gain: float = float(
             np.clip(getattr(self.config, "blocked_normal_force_gain", 0.20), 0.0, 1.0)
         )
+        self.goal_angle_tolerance: float = float(
+            getattr(self.config, "goal_angle_tolerance", 0.2)
+        )
 
         # Flags.
         self.external_control: bool = False
@@ -71,6 +74,9 @@ class World:
             )
             self.blocked_normal_force_gain = float(
                 np.clip(getattr(self.config, "blocked_normal_force_gain", 0.20), 0.0, 1.0)
+            )
+            self.goal_angle_tolerance = float(
+                getattr(self.config, "goal_angle_tolerance", 0.2)
             )
 
         self.t = 0.0
@@ -110,6 +116,7 @@ class World:
         )
         self.obj.goal_x = self.config.goal_x
         self.obj.goal_y = self.config.goal_y
+        self.obj.goal_theta = getattr(self.config, "goal_theta", None)
 
     def _create_robots(self) -> None:
         """Spawn robots from config or auto-generate around cargo."""
@@ -501,5 +508,5 @@ class World:
                 r.theta = self.obj.theta + r._theta_offset
 
         # 9. Success check.
-        if self.obj.reached_goal():
+        if self.obj.reached_goal(angle_tol=self.goal_angle_tolerance):
             self.success = True

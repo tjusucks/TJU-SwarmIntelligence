@@ -87,11 +87,11 @@ class ActorCritic(nn.Module):
 
     def load_state_dict(self, state_dict: dict[str, torch.Tensor], strict: bool = True) -> tuple[list[str], list[str]]:
         """Custom load_state_dict to map independent policies checkpoint to shared policy if needed."""
-        is_independent = any(k.startswith("models.") for k in state_dict.keys())
+        is_independent = any(k.startswith("models.") for k in state_dict)
         if is_independent:
             print("Mapping independent policies checkpoint to shared policy (using first agent's weights)...")
             first_agent_prefix = None
-            for k in state_dict.keys():
+            for k in state_dict:
                 if k.startswith("models."):
                     first_agent_prefix = k.split(".")[1]
                     break
@@ -202,7 +202,7 @@ class IndependentPolicies(nn.Module):
         """Custom load_state_dict to map shared policy checkpoint to independent policies if needed."""
         is_shared = any(
             k.startswith("encoder.") or k.startswith("actor_mean.") or k.startswith("critic.") or k == "log_std"
-            for k in state_dict.keys()
+            for k in state_dict
         )
         if is_shared:
             print("Mapping shared policy checkpoint to independent policies...")

@@ -72,6 +72,7 @@ class TransportObject:
 
         self.goal_x: float | None = None
         self.goal_y: float | None = None
+        self.goal_theta: float | None = None
 
     def apply_force(
         self,
@@ -133,8 +134,14 @@ class TransportObject:
         """Center-of-mass position as a numpy array."""
         return np.array([self.x, self.y])
 
-    def reached_goal(self, tol: float = 30.0) -> bool:
+    def reached_goal(self, tol: float = 30.0, angle_tol: float | None = None) -> bool:
         """Check whether the cargo is within *tol* pixels of the goal."""
         if self.goal_x is None:
             return False
-        return float(np.hypot(self.x - self.goal_x, self.y - self.goal_y)) < tol
+        pos_reached = float(np.hypot(self.x - self.goal_x, self.y - self.goal_y)) < tol
+        if not pos_reached:
+            return False
+        if self.goal_theta is None or angle_tol is None:
+            return True
+        diff_theta = (self.theta - self.goal_theta + np.pi) % (2 * np.pi) - np.pi
+        return abs(diff_theta) < angle_tol

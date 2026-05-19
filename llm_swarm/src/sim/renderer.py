@@ -58,6 +58,57 @@ class Renderer:
             pygame.draw.circle(s, (*GOAL_COLOR, alpha), (r, r), r)
             self.screen.blit(s, (gx - r, gy - r))
         pygame.draw.circle(self.screen, GOAL_COLOR, (gx, gy), 12, 2)
+
+        # Draw ghost cargo silhouette rotated by goal_theta if set
+        if getattr(obj, "goal_theta", None) is not None:
+            temp_surface = pygame.Surface(
+                (self.world.width, self.world.height), pygame.SRCALPHA
+            )
+            cg, sg = np.cos(obj.goal_theta), np.sin(obj.goal_theta)
+            rot_g = np.array([[cg, -sg], [sg, cg]])
+            for lx, ly, w, h in obj.parts:
+                corners_local = np.array(
+                    [
+                        [lx, ly],
+                        [lx + w, ly],
+                        [lx + w, ly + h],
+                        [lx, ly + h],
+                    ]
+                )
+                corners_world = (
+                    np.array([obj.goal_x, obj.goal_y]) + (rot_g @ corners_local.T).T
+                )
+                pts = [(int(p[0]), int(p[1])) for p in corners_world]
+                pygame.draw.polygon(temp_surface, (*GOAL_COLOR, 40), pts)
+                pygame.draw.polygon(temp_surface, (*GOAL_COLOR, 120), pts, 2)
+            self.screen.blit(temp_surface, (0, 0))
+
+            # Draw target heading arrow at goal
+            arrow_len = 30
+            ex = int(obj.goal_x + arrow_len * cg)
+            ey = int(obj.goal_y + arrow_len * sg)
+            pygame.draw.line(self.screen, GOAL_COLOR, (gx, gy), (ex, ey), 3)
+            # Arrow head
+            arrow_head_angle = np.pi / 6
+            h_len = 8
+            left_wing = (
+                ex - h_len * np.cos(obj.goal_theta - arrow_head_angle),
+                ey - h_len * np.sin(obj.goal_theta - arrow_head_angle),
+            )
+            right_wing = (
+                ex - h_len * np.cos(obj.goal_theta + arrow_head_angle),
+                ey - h_len * np.sin(obj.goal_theta + arrow_head_angle),
+            )
+            pygame.draw.polygon(
+                self.screen,
+                GOAL_COLOR,
+                [
+                    (ex, ey),
+                    (int(left_wing[0]), int(left_wing[1])),
+                    (int(right_wing[0]), int(right_wing[1])),
+                ],
+            )
+
         label = self.font_sm.render("GOAL", True, GOAL_COLOR)
         self.screen.blit(label, (gx - label.get_width() // 2, gy + 16))
 

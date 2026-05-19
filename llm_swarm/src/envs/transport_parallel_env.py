@@ -121,6 +121,10 @@ class TransportParallelEnv(ParallelEnv):
         random_init_theta: bool = False,
         init_theta_min: float = -np.pi,
         init_theta_max: float = np.pi,
+        goal_orientation_matching: bool = False,
+        goal_angle_tolerance: float = 0.2,
+        goal_heading_reward_weight: float = 0.5,
+        random_goal_theta: bool = False,
         curriculum_stage: str = "none",
         stage3_gap_height: float = 200.0,
         stage3_wall_width: int = 42,
@@ -160,8 +164,12 @@ class TransportParallelEnv(ParallelEnv):
             0.0,
             float(ineffective_action_penalty_weight),
         )
-        self.ineffective_action_threshold = max(0.0, float(ineffective_action_threshold))
-        self.ineffective_motion_threshold = max(0.0, float(ineffective_motion_threshold))
+        self.ineffective_action_threshold = max(
+            0.0, float(ineffective_action_threshold)
+        )
+        self.ineffective_motion_threshold = max(
+            0.0, float(ineffective_motion_threshold)
+        )
         self.ineffective_blocked_ratio_threshold = float(
             np.clip(ineffective_blocked_ratio_threshold, 0.0, 1.0)
         )
@@ -178,17 +186,23 @@ class TransportParallelEnv(ParallelEnv):
         self.fail_fast_low_progress_window = max(1, int(fail_fast_low_progress_window))
         self.fail_fast_low_progress_threshold = float(fail_fast_low_progress_threshold)
         self.fail_fast_high_blocked_steps = max(1, int(fail_fast_high_blocked_steps))
-        self.fail_fast_blocked_ratio_threshold = float(np.clip(fail_fast_blocked_ratio_threshold, 0.0, 1.0))
+        self.fail_fast_blocked_ratio_threshold = float(
+            np.clip(fail_fast_blocked_ratio_threshold, 0.0, 1.0)
+        )
         self.fail_fast_ineffective_steps = max(1, int(fail_fast_ineffective_steps))
         self.fail_fast_return_threshold = float(fail_fast_return_threshold)
         self.fail_fast_penalty = max(0.0, float(fail_fast_penalty))
         self.fail_fast_oscillation_window = max(8, int(fail_fast_oscillation_window))
-        self.fail_fast_oscillation_patience = max(1, int(fail_fast_oscillation_patience))
+        self.fail_fast_oscillation_patience = max(
+            1, int(fail_fast_oscillation_patience)
+        )
         self.fail_fast_oscillation_net_disp_threshold = max(
             1e-3,
             float(fail_fast_oscillation_net_disp_threshold),
         )
-        self.fail_fast_oscillation_path_min = max(0.0, float(fail_fast_oscillation_path_min))
+        self.fail_fast_oscillation_path_min = max(
+            0.0, float(fail_fast_oscillation_path_min)
+        )
         self.fail_fast_oscillation_min_flip_count = max(
             1,
             int(fail_fast_oscillation_min_flip_count),
@@ -202,7 +216,9 @@ class TransportParallelEnv(ParallelEnv):
         self.rot_jam_reward_weight = float(rot_jam_reward_weight)
         self.effective_rot_reward = float(effective_rot_reward)
         self.effective_rot_theta_threshold = float(effective_rot_theta_threshold)
-        self.rotation_no_penalty_theta_threshold = float(rotation_no_penalty_theta_threshold)
+        self.rotation_no_penalty_theta_threshold = float(
+            rotation_no_penalty_theta_threshold
+        )
         self.jam_state_motion_threshold = float(jam_state_motion_threshold)
         self.jam_penalty_motion_threshold = float(jam_penalty_motion_threshold)
         self.action_penalty_weight = action_penalty_weight
@@ -252,6 +268,10 @@ class TransportParallelEnv(ParallelEnv):
         self.random_init_theta = random_init_theta
         self.init_theta_min = float(init_theta_min)
         self.init_theta_max = float(init_theta_max)
+        self.goal_orientation_matching = bool(goal_orientation_matching)
+        self.goal_angle_tolerance = float(goal_angle_tolerance)
+        self.goal_heading_reward_weight = float(goal_heading_reward_weight)
+        self.random_goal_theta = bool(random_goal_theta)
         self.curriculum_stage = curriculum_stage
         self.stage3_gap_height = stage3_gap_height
         self.stage3_wall_width = stage3_wall_width
@@ -327,9 +347,7 @@ class TransportParallelEnv(ParallelEnv):
                     fixed_cfg.cargo_preset = self.fixed_cargo_preset
                 self.world.reset(config=fixed_cfg)
 
-        self.possible_agents = [
-            f"robot_{i}" for i in range(len(self.world.robots))
-        ]
+        self.possible_agents = [f"robot_{i}" for i in range(len(self.world.robots))]
         self.agents = list(self.possible_agents)
 
         self._obs_dim = self._compute_obs_dim()
@@ -374,8 +392,16 @@ class TransportParallelEnv(ParallelEnv):
 
         if self._base_config is not None:
             config = self._base_config
+            if self.random_goal_theta:
+                config.goal_theta = float(np.random.uniform(-np.pi, np.pi))
         else:
-            config = self._generator.generate(seed=self._episode_seed)
+            config = self._generator.generate(
+                seed=self._episode_seed,
+                random_init_theta=self.random_init_theta,
+                init_theta_min=self.init_theta_min,
+                init_theta_max=self.init_theta_max,
+                random_goal_theta=self.random_goal_theta,
+            )
             self._episode_seed += 1
 
         if self.fixed_num_agents is not None:
@@ -396,10 +422,21 @@ class TransportParallelEnv(ParallelEnv):
         if self.no_obstacles:
             config.obstacles = []
         config.wall_slide_gain = self.wall_slide_gain
-        if self.random_init_theta:
-            config.cargo_theta = float(np.random.uniform(self.init_theta_min, self.init_theta_max))
-        else:
-            config.cargo_theta = float(getattr(config, "cargo_theta", 0.0))
+        config.goal_angle_tolerance = self.goal_angle_tolerance
+
+        if getattr(config, "cargo_theta", None) is None:
+            if self.random_init_theta:
+                config.cargo_theta = float(
+                    np.random.uniform(self.init_theta_min, self.init_theta_max)
+                )
+            else:
+                config.cargo_theta = 0.0
+
+        if (
+            self.goal_orientation_matching
+            and getattr(config, "goal_theta", None) is None
+        ):
+            config.goal_theta = 0.0
 
         self.world.external_control = True
         self.world.reset(config=config)
@@ -482,8 +519,12 @@ class TransportParallelEnv(ParallelEnv):
                 robot = self.world.robots[idx]
                 action = np.asarray(actions.get(agent, np.zeros(2, dtype=np.float32)))
                 action = np.clip(action, -1.0, 1.0)
-                residual_fx = float(action[0] * self.force_max * self.residual_force_scale)
-                residual_fy = float(action[1] * self.force_max * self.residual_force_scale)
+                residual_fx = float(
+                    action[0] * self.force_max * self.residual_force_scale
+                )
+                residual_fy = float(
+                    action[1] * self.force_max * self.residual_force_scale
+                )
                 cmd_fx = base_fx + residual_fx
                 cmd_fy = base_fy + residual_fy
                 cmd_norm = float(np.hypot(cmd_fx, cmd_fy))
@@ -517,7 +558,9 @@ class TransportParallelEnv(ParallelEnv):
                 residual_mean[2] * tau_scale * self.object_wrench_residual_scale_tau
             )
 
-            attached_indices = [i for i, r in enumerate(self.world.robots) if r.attached]
+            attached_indices = [
+                i for i, r in enumerate(self.world.robots) if r.attached
+            ]
             rel_points = np.asarray(
                 [
                     self.world.obj.attach_points_local[self.world.robots[i]._attach_idx]
@@ -569,10 +612,9 @@ class TransportParallelEnv(ParallelEnv):
         self._prev_distance = curr_dist
         self._prev_route_dist = self._distance_to_current_waypoint()
 
-        blocked_ratio = (
-            sum(float(getattr(r, "blocked", False)) for r in self.world.robots)
-            / max(1, len(self.world.robots))
-        )
+        blocked_ratio = sum(
+            float(getattr(r, "blocked", False)) for r in self.world.robots
+        ) / max(1, len(self.world.robots))
         in_contact = blocked_ratio >= self.contact_ratio_threshold
         if in_contact:
             self._contact_streak_steps += 1
@@ -612,7 +654,9 @@ class TransportParallelEnv(ParallelEnv):
         else:
             self._route_wall_stuck_steps = max(0, self._route_wall_stuck_steps - 1)
 
-        oscillating_now = self._update_oscillation_status(curr_pos=curr_pos, curr_dist=curr_dist)
+        oscillating_now = self._update_oscillation_status(
+            curr_pos=curr_pos, curr_dist=curr_dist
+        )
 
         # Fast hard-stuck detector: low movement + low route progress while
         # in contact should trigger a more aggressive reroute+recovery path.
@@ -638,7 +682,9 @@ class TransportParallelEnv(ParallelEnv):
             oscillating_now and self._oscillation_streak_steps >= osc_replan_steps
         )
         replan_by_stall = self._route_stall_steps >= self.reroute_stall_steps
-        replan_by_wall_stuck = self._route_wall_stuck_steps >= self.reroute_wall_stuck_steps
+        replan_by_wall_stuck = (
+            self._route_wall_stuck_steps >= self.reroute_wall_stuck_steps
+        )
         if (
             replan_by_hard_stuck
             or replan_by_oscillation
@@ -661,7 +707,9 @@ class TransportParallelEnv(ParallelEnv):
             if self._last_route_replanned:
                 self._route_replan_count += 1
                 if replan_by_hard_stuck:
-                    self._route_replan_cooldown = max(8, self.reroute_cooldown_steps // 2)
+                    self._route_replan_cooldown = max(
+                        8, self.reroute_cooldown_steps // 2
+                    )
                     self._last_route_replan_reason = "hard_stuck"
                     self._hard_recovery_steps = max(
                         self._hard_recovery_steps,
@@ -673,7 +721,9 @@ class TransportParallelEnv(ParallelEnv):
                     )
                     self._escape_burst_sign *= -1.0
                 elif replan_by_oscillation:
-                    self._route_replan_cooldown = max(6, self.reroute_cooldown_steps // 3)
+                    self._route_replan_cooldown = max(
+                        6, self.reroute_cooldown_steps // 3
+                    )
                     self._last_route_replan_reason = "oscillation"
                     self._hard_recovery_steps = max(
                         self._hard_recovery_steps,
@@ -716,11 +766,25 @@ class TransportParallelEnv(ParallelEnv):
         heading_align_term = 0.0
         curr_heading_abs_err = self._heading_abs_error()
         heading_improve = self._prev_heading_abs_err - curr_heading_abs_err
-        heading_align_term = self.heading_reward_weight * (
-            heading_improve
-        )
+        heading_align_term = self.heading_reward_weight * (heading_improve)
         reward += heading_align_term
         self._prev_heading_abs_err = curr_heading_abs_err
+
+        goal_heading_align_term = 0.0
+        if self.goal_orientation_matching:
+            g_theta = getattr(self.world.obj, "goal_theta", None)
+            if g_theta is not None:
+                curr_goal_err = abs(
+                    (self.world.obj.theta - g_theta + np.pi) % (2 * np.pi) - np.pi
+                )
+                prev_goal_err = abs(
+                    (self._prev_obj_theta - g_theta + np.pi) % (2 * np.pi) - np.pi
+                )
+                goal_heading_improve = prev_goal_err - curr_goal_err
+                goal_heading_align_term = (
+                    self.goal_heading_reward_weight * goal_heading_improve
+                )
+                reward += goal_heading_align_term
 
         prev_theta = self._prev_obj_theta
         curr_theta = float(self.world.obj.theta)
@@ -734,7 +798,8 @@ class TransportParallelEnv(ParallelEnv):
             reward += single_contact_term
         if in_contact and self._contact_streak_steps > 1:
             persistent_contact_term = -(
-                self.persistent_contact_penalty_weight * float(self._contact_streak_steps)
+                self.persistent_contact_penalty_weight
+                * float(self._contact_streak_steps)
             )
             reward += persistent_contact_term
 
@@ -761,19 +826,20 @@ class TransportParallelEnv(ParallelEnv):
             )
             reward += ineffective_action_term
 
+        obs_clearance = self._distance_object_to_obstacle_or_wall()
+
         rot_jam_term = 0.0
-        jam_state = bool(move_dist < self.jam_state_motion_threshold and blocked_ratio > 0.0)
+        jam_state = bool(
+            move_dist < self.jam_state_motion_threshold and blocked_ratio > 0.0
+        )
         if jam_state and heading_improve > 0.0:
             rot_jam_term = self.rot_jam_reward_weight * heading_improve
             reward += rot_jam_term
 
         effective_rot_term = 0.0
-        if (
-            delta_theta_abs > self.effective_rot_theta_threshold
-            and (
-                obs_clearance > (self._prev_obs_clearance + 1e-3)
-                or blocked_ratio + 1e-6 < self._prev_blocked_ratio
-            )
+        if delta_theta_abs > self.effective_rot_theta_threshold and (
+            obs_clearance > (self._prev_obs_clearance + 1e-3)
+            or blocked_ratio + 1e-6 < self._prev_blocked_ratio
         ):
             effective_rot_term = self.effective_rot_reward
             reward += effective_rot_term
@@ -792,7 +858,10 @@ class TransportParallelEnv(ParallelEnv):
 
         recover_term = 0.0
         if self._prev_jammed and self._jam_streak_steps == 0:
-            escaped = bool(move_dist > self.ineffective_motion_threshold or blocked_ratio < self._prev_blocked_ratio)
+            escaped = bool(
+                move_dist > self.ineffective_motion_threshold
+                or blocked_ratio < self._prev_blocked_ratio
+            )
             if escaped:
                 recover_term = self.recover_reward_weight
                 reward += recover_term
@@ -803,7 +872,6 @@ class TransportParallelEnv(ParallelEnv):
 
         # Nonlinear proximity penalty: approaching walls/obstacles is allowed,
         # but penalty rises sharply as clearance gets smaller.
-        obs_clearance = self._distance_object_to_obstacle_or_wall()
         clearance_term = 0.0
         if obs_clearance < self.clearance_safe_distance:
             proximity = 1.0 - obs_clearance / max(1e-6, self.clearance_safe_distance)
@@ -814,7 +882,9 @@ class TransportParallelEnv(ParallelEnv):
         # making positive route progress, return part of the collision penalty.
         contact_progress_term = 0.0
         if blocked_ratio > 0.0 and progress > 0.0:
-            progress_factor = float(np.clip(progress / self.contact_progress_ref, 0.0, 1.0))
+            progress_factor = float(
+                np.clip(progress / self.contact_progress_ref, 0.0, 1.0)
+            )
             contact_factor = float(
                 np.clip(
                     1.0 - obs_clearance / max(1e-6, self.clearance_safe_distance * 1.2),
@@ -846,7 +916,10 @@ class TransportParallelEnv(ParallelEnv):
         # Suppress this term when most robots are blocked to avoid forcing wall pushing.
         obj_speed = float(np.hypot(self.world.obj.vx, self.world.obj.vy))
         low_speed_term = 0.0
-        if curr_dist > self.low_speed_far_goal_radius and obj_speed < self.low_speed_threshold:
+        if (
+            curr_dist > self.low_speed_far_goal_radius
+            and obj_speed < self.low_speed_threshold
+        ):
             speed_deficit = 1.0 - obj_speed / max(1e-6, self.low_speed_threshold)
             mobility_factor = float(np.clip(1.0 - blocked_ratio, 0.0, 1.0))
             low_speed_term = -(
@@ -928,7 +1001,9 @@ class TransportParallelEnv(ParallelEnv):
 
         projected_episode_return = float(self._episode_return + reward)
         return_fail_fast = projected_episode_return <= self.fail_fast_return_threshold
-        oscillation_failure = self._oscillation_streak_steps >= self.fail_fast_oscillation_patience
+        oscillation_failure = (
+            self._oscillation_streak_steps >= self.fail_fast_oscillation_patience
+        )
         fail_fast_failure = bool(return_fail_fast or oscillation_failure)
         self._last_fail_fast_failure = fail_fast_failure
         if oscillation_failure:
@@ -962,6 +1037,7 @@ class TransportParallelEnv(ParallelEnv):
             "progress": float(progress_term),
             "time": float(time_term),
             "heading_align": float(heading_align_term),
+            "goal_heading": float(goal_heading_align_term),
             "rot_jam": float(rot_jam_term),
             "effective_rot": float(effective_rot_term),
             "blocked": float(blocked_term),
@@ -1013,11 +1089,16 @@ class TransportParallelEnv(ParallelEnv):
         return
 
     def _compute_obs_dim(self) -> int:
-        base = 17
+        base = 19 if self.goal_orientation_matching else 17
         per_robot = 7
         per_obstacle = 5
         own = 1
-        return base + per_robot * len(self.world.robots) + per_obstacle * self.max_obstacles + own
+        return (
+            base
+            + per_robot * len(self.world.robots)
+            + per_obstacle * self.max_obstacles
+            + own
+        )
 
     def _collect_obs(self) -> dict[str, np.ndarray]:
         global_obs = self._global_obs_vector()
@@ -1067,16 +1148,21 @@ class TransportParallelEnv(ParallelEnv):
             ]
         )
 
-        blocked_ratio = (
-            sum(float(getattr(r, "blocked", False)) for r in self.world.robots)
-            / max(1, len(self.world.robots))
-        )
+        blocked_ratio = sum(
+            float(getattr(r, "blocked", False)) for r in self.world.robots
+        ) / max(1, len(self.world.robots))
         vec.extend(
             [
                 self._distance_object_to_obstacle_or_wall() / diag,
                 blocked_ratio,
             ]
         )
+
+        if self.goal_orientation_matching:
+            g_theta = getattr(obj, "goal_theta", None)
+            if g_theta is None:
+                g_theta = 0.0
+            vec.extend([float(np.sin(g_theta)), float(np.cos(g_theta))])
 
         for r in self.world.robots:
             vec.extend(
@@ -1129,10 +1215,9 @@ class TransportParallelEnv(ParallelEnv):
         return float(np.hypot(self.world.width, self.world.height))
 
     def _build_info(self) -> dict:
-        blocked_ratio = (
-            sum(float(getattr(r, "blocked", False)) for r in self.world.robots)
-            / max(1, len(self.world.robots))
-        )
+        blocked_ratio = sum(
+            float(getattr(r, "blocked", False)) for r in self.world.robots
+        ) / max(1, len(self.world.robots))
         stuck_failure = bool(
             self._stuck_steps >= self.stuck_patience
             and (blocked_ratio >= 0.999 or self.world.invalid_state)
@@ -1438,7 +1523,9 @@ class TransportParallelEnv(ParallelEnv):
             if len(wps) < 2:
                 continue
 
-            first_vec = np.array([wps[0][0] - obj.x, wps[0][1] - obj.y], dtype=np.float32)
+            first_vec = np.array(
+                [wps[0][0] - obj.x, wps[0][1] - obj.y], dtype=np.float32
+            )
             first_dist = float(np.linalg.norm(first_vec))
             first_align = 0.0
             if first_dist > 1e-6 and old_dir_norm > 1e-8:
@@ -1450,7 +1537,11 @@ class TransportParallelEnv(ParallelEnv):
             # tiny first segments that tend to trap the controller in corners.
             score = route_len
             score += 120.0 * max(0.0, first_align - 0.45)
-            score += 70.0 if first_dist < max(18.0, 0.30 * self.route_waypoint_tolerance) else 0.0
+            score += (
+                70.0
+                if first_dist < max(18.0, 0.30 * self.route_waypoint_tolerance)
+                else 0.0
+            )
 
             if score < best_score:
                 best_score = score
@@ -1508,7 +1599,9 @@ class TransportParallelEnv(ParallelEnv):
         )
         steer_dir = route_dir.copy()
         if float(np.hypot(repel_dir[0], repel_dir[1])) > 1e-8 and avoid_intensity > 0.0:
-            steer_dir = route_dir + repel_dir * (self.avoid_blend_gain * (avoid_intensity**2))
+            steer_dir = route_dir + repel_dir * (
+                self.avoid_blend_gain * (avoid_intensity**2)
+            )
             n = float(np.hypot(steer_dir[0], steer_dir[1]))
             if n > 1e-8:
                 steer_dir = steer_dir / n
@@ -1540,10 +1633,9 @@ class TransportParallelEnv(ParallelEnv):
 
         # Collision recovery: when close to walls/obstacles or repeatedly stuck,
         # add an outward push and a turning bias instead of sliding along walls.
-        blocked_ratio = (
-            sum(float(getattr(r, "blocked", False)) for r in self.world.robots)
-            / max(1, len(self.world.robots))
-        )
+        blocked_ratio = sum(
+            float(getattr(r, "blocked", False)) for r in self.world.robots
+        ) / max(1, len(self.world.robots))
         repel_dir, obs_clearance = self._nearest_obstacle_repulsion()
         forced_level = int(self._hard_recovery_steps)
         forced_escape = forced_level > 0
@@ -1593,8 +1685,10 @@ class TransportParallelEnv(ParallelEnv):
                     np.clip(forced_level / max(1.0, float(2 * burst_len)), 0.0, 1.0)
                 )
                 stuck_factor = max(stuck_factor, forced_factor)
-            push = self.recovery_push_gain * self.force_max * (
-                0.45 + intensity + 0.35 * stuck_factor + 0.25 * blocked_ratio
+            push = (
+                self.recovery_push_gain
+                * self.force_max
+                * (0.45 + intensity + 0.35 * stuck_factor + 0.25 * blocked_ratio)
             )
             base_fx += float(repel_dir[0] * push)
             base_fy += float(repel_dir[1] * push)
@@ -1617,8 +1711,10 @@ class TransportParallelEnv(ParallelEnv):
             turn_sign = lateral_sign
             if abs(turn_sign) < 1e-6:
                 turn_sign = 1.0
-            base_tau += self.recovery_torque_gain * turn_sign * (
-                0.35 + intensity + 0.25 * stuck_factor + 0.20 * blocked_ratio
+            base_tau += (
+                self.recovery_torque_gain
+                * turn_sign
+                * (0.35 + intensity + 0.25 * stuck_factor + 0.20 * blocked_ratio)
             )
 
             # Escape burst mode: when jammed for many steps at a narrow gate,
@@ -1631,27 +1727,41 @@ class TransportParallelEnv(ParallelEnv):
                 route_clear_factor = 1.0 - route_into_obs
 
                 # Strong backoff only when the route direction points into obstacle.
-                backoff = self.force_max * self.recovery_push_gain * (
-                    (0.06 + 0.24 * burst_phase) + (0.16 + 0.22 * burst_phase) * route_into_obs
+                backoff = (
+                    self.force_max
+                    * self.recovery_push_gain
+                    * (
+                        (0.06 + 0.24 * burst_phase)
+                        + (0.16 + 0.22 * burst_phase) * route_into_obs
+                    )
                 )
                 base_fx -= float(route_dir[0] * backoff)
                 base_fy -= float(route_dir[1] * backoff)
 
                 # If route direction is relatively clear, keep probing forward to
                 # avoid "stuck but never try upward/goalward" behavior.
-                forward_probe = self.force_max * self.recovery_push_gain * (
-                    0.08 + 0.20 * burst_phase
-                ) * route_clear_factor
+                forward_probe = (
+                    self.force_max
+                    * self.recovery_push_gain
+                    * (0.08 + 0.20 * burst_phase)
+                    * route_clear_factor
+                )
                 base_fx += float(route_dir[0] * forward_probe)
                 base_fy += float(route_dir[1] * forward_probe)
 
                 sweep_sign = self._escape_burst_sign
                 if ((self._step_count // 6) % 2) == 1:
                     sweep_sign *= -1.0
-                sweep_mag = self.force_max * self.recovery_push_gain * (0.22 + 0.28 * burst_phase)
+                sweep_mag = (
+                    self.force_max
+                    * self.recovery_push_gain
+                    * (0.22 + 0.28 * burst_phase)
+                )
                 base_fx += float(tangent[0] * sweep_sign * sweep_mag)
                 base_fy += float(tangent[1] * sweep_sign * sweep_mag)
-                base_tau += self.recovery_torque_gain * sweep_sign * (0.45 + 0.55 * burst_phase)
+                base_tau += (
+                    self.recovery_torque_gain * sweep_sign * (0.45 + 0.55 * burst_phase)
+                )
                 self._escape_burst_steps = max(0, self._escape_burst_steps - 1)
 
         return float(base_fx), float(base_fy), float(base_tau)
@@ -1666,9 +1776,15 @@ class TransportParallelEnv(ParallelEnv):
             for vx, vy in poly:
                 candidates: list[tuple[float, np.ndarray]] = [
                     (float(vx), np.array([1.0, 0.0], dtype=np.float32)),
-                    (float(self.world.width - vx), np.array([-1.0, 0.0], dtype=np.float32)),
+                    (
+                        float(self.world.width - vx),
+                        np.array([-1.0, 0.0], dtype=np.float32),
+                    ),
                     (float(vy), np.array([0.0, 1.0], dtype=np.float32)),
-                    (float(self.world.height - vy), np.array([0.0, -1.0], dtype=np.float32)),
+                    (
+                        float(self.world.height - vy),
+                        np.array([0.0, -1.0], dtype=np.float32),
+                    ),
                 ]
 
                 for ox, oy, ow, oh in self.world.obstacles:
@@ -1735,7 +1851,9 @@ class TransportParallelEnv(ParallelEnv):
         dists = np.linalg.norm(pts - p, axis=1)
         return float(np.min(dists))
 
-    def _update_oscillation_status(self, curr_pos: np.ndarray, curr_dist: float) -> bool:
+    def _update_oscillation_status(
+        self, curr_pos: np.ndarray, curr_dist: float
+    ) -> bool:
         """Track whether the object is oscillating in place for too long."""
         self._recent_obj_positions.append(np.asarray(curr_pos, dtype=np.float32).copy())
 

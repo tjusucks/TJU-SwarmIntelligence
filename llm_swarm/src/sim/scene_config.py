@@ -105,6 +105,7 @@ class SceneConfig:
     # -- Goal ---------------------------------------------------------------
     goal_x: float = 750.0
     goal_y: float = 380.0
+    goal_theta: float | None = None
 
     # -- Obstacles ----------------------------------------------------------
     obstacles: list[tuple[int, int, int, int]] = field(
@@ -172,17 +173,34 @@ class SceneGenerator:
         self.width = width
         self.height = height
 
-    def generate(self, seed: int = 42) -> SceneConfig:
+    def generate(
+        self,
+        seed: int = 42,
+        random_init_theta: bool = False,
+        init_theta_min: float = -np.pi,
+        init_theta_max: float = np.pi,
+        random_goal_theta: bool = False,
+    ) -> SceneConfig:
         """Generate a ``SceneConfig`` for the given seed.
 
         Args:
             seed: Integer seed for reproducibility.
+            random_init_theta: Whether to randomize cargo starting angle.
+            init_theta_min: Minimum starting angle.
+            init_theta_max: Maximum starting angle.
+            random_goal_theta: Whether to randomize target goal orientation.
 
         Returns:
             A fully populated ``SceneConfig``.
         """
         if self.level == RandomLevel.FIXED:
             cfg = SceneConfig(seed=seed, width=self.width, height=self.height)
+            if random_init_theta:
+                rng = np.random.default_rng(seed)
+                cfg.cargo_theta = float(rng.uniform(init_theta_min, init_theta_max))
+            if random_goal_theta:
+                rng = np.random.default_rng(seed + 1)
+                cfg.goal_theta = float(rng.uniform(-np.pi, np.pi))
             return cfg
 
         rng = np.random.default_rng(seed)
@@ -196,8 +214,19 @@ class SceneGenerator:
             obstacles = self._random_obstacles(rng)
             num_robots = self._pick_num_robots(rng)
 
+            cargo_theta = float(rng.uniform(init_theta_min, init_theta_max)) if random_init_theta else 0.0
+            goal_theta = float(rng.uniform(-np.pi, np.pi)) if random_goal_theta else 0.0
+
             if self._is_valid_scene(
-                cargo_preset, cargo_x, cargo_y, goal_x, goal_y, obstacles, num_robots
+                cargo_preset,
+                cargo_x,
+                cargo_y,
+                goal_x,
+                goal_y,
+                obstacles,
+                num_robots,
+                cargo_theta=cargo_theta,
+                goal_theta=goal_theta,
             ):
                 return SceneConfig(
                     seed=seed,
@@ -206,8 +235,10 @@ class SceneGenerator:
                     cargo_preset=cargo_preset,
                     cargo_x=cargo_x,
                     cargo_y=cargo_y,
+                    cargo_theta=cargo_theta,
                     goal_x=goal_x,
                     goal_y=goal_y,
+                    goal_theta=goal_theta,
                     obstacles=obstacles,
                     num_robots=num_robots,
                 )
@@ -314,6 +345,33 @@ class SceneGenerator:
 
         return obstacles
 
+    def _poly_intersects_aabb(
+        self, poly: np.ndarray, rect: tuple[int, int, int, int]
+    ) -> bool:
+        """SAT collision test between an arbitrary polygon and an AABB."""
+        ox, oy, w, h = rect
+        aabb_corners = np.array(
+            [[ox, oy], [ox + w, oy], [ox + w, oy + h], [ox, oy + h]]
+        )
+
+        edges = np.diff(np.vstack([poly, poly[0]]), axis=0)
+        normals = np.column_stack([-edges[:, 1], edges[:, 0]])
+
+        axes = np.vstack(([[1.0, 0.0], [0.0, 1.0]], normals))
+
+        for ax in axes:
+            mag = np.hypot(ax[0], ax[1])
+            if mag < 1e-8:
+                continue
+            ax = ax / mag
+
+            p_aabb = aabb_corners @ ax
+            p_poly = poly @ ax
+
+            if np.max(p_aabb) < np.min(p_poly) or np.max(p_poly) < np.min(p_aabb):
+                return False
+        return True
+
     def _is_valid_scene(
         self,
         cargo_preset: str,
@@ -323,6 +381,8 @@ class SceneGenerator:
         goal_y: float,
         obstacles: list[tuple[int, int, int, int]],
         num_robots: int,
+        cargo_theta: float = 0.0,
+        goal_theta: float = 0.0,
     ) -> bool:
         """
         Check if the generated scene has any overlapping colliders or bounds violations.
@@ -330,38 +390,53 @@ class SceneGenerator:
         cargo_parts = CARGO_PRESETS[cargo_preset]["parts"]
         padding = 5.0  # Small safety margin
 
-        # 1. Check Cargo vs Boundaries and Obstacles
+        # 1. Check Cargo vs Boundaries and Obstacles at START POSE
+        c, s = np.cos(cargo_theta), np.sin(cargo_theta)
+        rot = np.array([[c, -s], [s, c]])
         for lx, ly, w, h in cargo_parts:
-            # AABB of this part in world space (initial rotation is 0)
-            c_left = cargo_x + lx - padding
-            c_right = cargo_x + lx + w + padding
-            c_top = cargo_y + ly - padding
-            c_bottom = cargo_y + ly + h + padding
+            corners_local = np.array(
+                [[lx, ly], [lx + w, ly], [lx + w, ly + h], [lx, ly + h]]
+            )
+            corners_world = np.array([cargo_x, cargo_y]) + (rot @ corners_local.T).T
 
             # Boundary check
             if (
-                c_left < 0
-                or c_right > self.width
-                or c_top < 0
-                or c_bottom > self.height
+                np.any(corners_world[:, 0] < padding)
+                or np.any(corners_world[:, 0] > self.width - padding)
+                or np.any(corners_world[:, 1] < padding)
+                or np.any(corners_world[:, 1] > self.height - padding)
             ):
                 return False
 
             # Obstacle check
-            for ox, oy, ow, oh in obstacles:
-                o_left, o_right = ox, ox + ow
-                o_top, o_bottom = oy, oy + oh
-
-                # AABB intersection test
-                if not (
-                    c_right <= o_left
-                    or c_left >= o_right
-                    or c_bottom <= o_top
-                    or c_top >= o_bottom
-                ):
+            for obs in obstacles:
+                if self._poly_intersects_aabb(corners_world, obs):
                     return False
 
-        # 2. Check Attached Robots vs Boundaries and Obstacles
+        # 2. Check Cargo vs Boundaries and Obstacles at GOAL POSE
+        cg, sg = np.cos(goal_theta), np.sin(goal_theta)
+        rot_g = np.array([[cg, -sg], [sg, cg]])
+        for lx, ly, w, h in cargo_parts:
+            corners_local = np.array(
+                [[lx, ly], [lx + w, ly], [lx + w, ly + h], [lx, ly + h]]
+            )
+            corners_world = np.array([goal_x, goal_y]) + (rot_g @ corners_local.T).T
+
+            # Boundary check
+            if (
+                np.any(corners_world[:, 0] < padding)
+                or np.any(corners_world[:, 0] > self.width - padding)
+                or np.any(corners_world[:, 1] < padding)
+                or np.any(corners_world[:, 1] > self.height - padding)
+            ):
+                return False
+
+            # Obstacle check
+            for obs in obstacles:
+                if self._poly_intersects_aabb(corners_world, obs):
+                    return False
+
+        # 3. Check Attached Robots vs Boundaries and Obstacles
         attach_points = CARGO_PRESETS[cargo_preset]["attach_points"]
         n_attach = len(attach_points)
         robot_radius = 18.0 + 2.0  # Robot.RADIUS + margin
@@ -369,8 +444,9 @@ class SceneGenerator:
         for i in range(num_robots):
             idx = i % n_attach
             rx, ry = attach_points[idx]
-            r_world_x = cargo_x + rx
-            r_world_y = cargo_y + ry
+            r_world = np.array([cargo_x, cargo_y]) + rot @ np.array([rx, ry])
+            r_world_x = r_world[0]
+            r_world_y = r_world[1]
 
             # Boundary check
             if (
@@ -388,7 +464,7 @@ class SceneGenerator:
                 if np.hypot(r_world_x - cx, r_world_y - cy) < robot_radius:
                     return False
 
-        # 3. Check Goal vs Obstacles
+        # 4. Check Goal vs Obstacles
         goal_radius = 30.0
         for ox, oy, ow, oh in obstacles:
             cx = max(ox, min(goal_x, ox + ow))

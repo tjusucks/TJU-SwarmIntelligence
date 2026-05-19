@@ -216,11 +216,7 @@ def main() -> None:
         level_name = "mild"
         no_obstacles = True
         random_init_theta = True
-    elif args.stage == "3":
-        level_name = "fixed"
-        no_obstacles = False
-        random_init_theta = True
-    elif args.stage == "4":
+    elif args.stage == "3" or args.stage == "4":
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True

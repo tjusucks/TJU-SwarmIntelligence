@@ -85,7 +85,9 @@ def main() -> None:
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu"
+    )
     if args.device == "cuda" and device.type != "cuda":
         print("[Warning] CUDA requested but unavailable. Falling back to CPU.")
 
@@ -132,12 +134,28 @@ def main() -> None:
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
+    goal_orientation_matching = checkpoint.get("goal_orientation_matching", False)
+    goal_angle_tolerance = checkpoint.get("goal_angle_tolerance", 0.2)
+    random_goal_theta = checkpoint.get("random_goal_theta", False)
+
+    # Or infer from obs_dim if not saved in checkpoint keys
+    if not goal_orientation_matching and obs_dim % 2 == 1:
+        # Check base dimension
+        # With default parameters, obs_dim is odd/even depending on goal_orientation_matching
+        pass
+
     level = RandomLevel(args.level)
-    config = SceneGenerator(level=level).generate(seed=args.seed)
+    config = SceneGenerator(level=level).generate(
+        seed=args.seed,
+        random_goal_theta=random_goal_theta,
+    )
     env = TransportParallelEnv(
         config=config,
         random_level=level,
         max_steps=args.max_episode_steps,
+        goal_orientation_matching=goal_orientation_matching,
+        goal_angle_tolerance=goal_angle_tolerance,
+        random_goal_theta=random_goal_theta,
     )
 
     agent_order = list(env.possible_agents)
@@ -168,11 +186,15 @@ def main() -> None:
 
         if not paused and observations:
             obs_batch = np.stack([observations[a] for a in agent_order], axis=0)
-            actions = policy_actions(model, obs_batch, device, stochastic=args.stochastic)
+            actions = policy_actions(
+                model, obs_batch, device, stochastic=args.stochastic
+            )
             action_dict = {agent_order[i]: actions[i] for i in range(len(agent_order))}
 
             observations, rewards, terms, truncs, infos = env.step(action_dict)
-            reward_batch = np.asarray([rewards[a] for a in agent_order], dtype=np.float32)
+            reward_batch = np.asarray(
+                [rewards[a] for a in agent_order], dtype=np.float32
+            )
             ep_return += float(np.mean(reward_batch))
 
             done = bool(all(terms[a] or truncs[a] for a in agent_order))

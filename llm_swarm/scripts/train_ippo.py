@@ -23,16 +23,22 @@ from src.sim.scene_config import RandomLevel
 
 def parse_args() -> argparse.Namespace:
     """Parse training arguments."""
-    parser = argparse.ArgumentParser(description="Train IPPO for cooperative transport.")
+    parser = argparse.ArgumentParser(
+        description="Train IPPO for cooperative transport."
+    )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--stage", type=str, default="none", choices=["none", "1", "2", "3", "4"])
+    parser.add_argument(
+        "--stage", type=str, default="none", choices=["none", "1", "2", "3", "4"]
+    )
     parser.add_argument(
         "--level",
         type=str,
         default="full",
         choices=["fixed", "mild", "moderate", "full"],
     )
-    parser.add_argument("--cargo-preset", type=str, default="L", choices=["L", "T", "U"])
+    parser.add_argument(
+        "--cargo-preset", type=str, default="L", choices=["L", "T", "U"]
+    )
     parser.add_argument("--num-agents", type=int, default=4)
     parser.add_argument("--total-steps", type=int, default=200_000)
     parser.add_argument("--rollout-steps", type=int, default=1024)
@@ -43,7 +49,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--progress-weight", type=float, default=360.0)
     parser.add_argument("--step-penalty", type=float, default=0.001)
     parser.add_argument("--blocked-penalty-weight", type=float, default=0.45)
-    parser.add_argument("--contact-progress-compensation-weight", type=float, default=0.10)
+    parser.add_argument(
+        "--contact-progress-compensation-weight", type=float, default=0.10
+    )
     parser.add_argument("--contact-progress-ref", type=float, default=0.0015)
     parser.add_argument("--success-bonus", type=float, default=12.0)
     parser.add_argument("--stuck-penalty", type=float, default=1.0)
@@ -100,6 +108,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-init-theta", action="store_true")
     parser.add_argument("--init-theta-min", type=float, default=-np.pi)
     parser.add_argument("--init-theta-max", type=float, default=np.pi)
+    parser.add_argument("--goal-orientation-matching", action="store_true")
+    parser.add_argument("--goal-angle-tolerance", type=float, default=0.2)
+    parser.add_argument("--goal-heading-reward-weight", type=float, default=0.5)
+    parser.add_argument("--random-goal-theta", action="store_true")
     parser.add_argument("--stage3-gap-height", type=float, default=200.0)
     parser.add_argument("--stage3-wall-width", type=int, default=42)
     parser.add_argument("--stage4-gap-span", type=float, default=165.0)
@@ -136,7 +148,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show reward-term breakdown overlay in the Pygame training window.",
     )
-    parser.add_argument("--save-path", type=str, default="checkpoints/ippo_transport.pt")
+    parser.add_argument(
+        "--save-path", type=str, default="checkpoints/ippo_transport.pt"
+    )
     parser.add_argument(
         "--resume",
         type=str,
@@ -199,11 +213,7 @@ def main() -> None:
         level_name = "mild"
         no_obstacles = True
         random_init_theta = True
-    elif args.stage == "3":
-        level_name = "fixed"
-        no_obstacles = False
-        random_init_theta = True
-    elif args.stage == "4":
+    elif args.stage == "3" or args.stage == "4":
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True
@@ -262,8 +272,8 @@ def main() -> None:
         route_waypoint_tolerance=args.route_waypoint_tolerance,
         route_progress_weight=args.route_progress_weight,
         route_deviation_penalty_weight=args.route_deviation_penalty_weight,
-            milestone_reward=args.milestone_reward,
-            milestone_radius=args.milestone_radius,
+        milestone_reward=args.milestone_reward,
+        milestone_radius=args.milestone_radius,
         action_mode=args.action_mode,
         object_wrench_residual_scale_xy=args.object_wrench_residual_scale_xy,
         object_wrench_residual_scale_tau=args.object_wrench_residual_scale_tau,
@@ -274,6 +284,10 @@ def main() -> None:
         random_init_theta=random_init_theta,
         init_theta_min=args.init_theta_min,
         init_theta_max=args.init_theta_max,
+        goal_orientation_matching=args.goal_orientation_matching,
+        goal_angle_tolerance=args.goal_angle_tolerance,
+        goal_heading_reward_weight=args.goal_heading_reward_weight,
+        random_goal_theta=args.random_goal_theta,
         curriculum_stage=args.stage,
         stage3_gap_height=args.stage3_gap_height,
         stage3_wall_width=args.stage3_wall_width,
@@ -364,15 +378,21 @@ def main() -> None:
             action_dict = {agent_order[i]: actions[i] for i in range(len(agent_order))}
             next_obs, rewards, terms, truncs, infos = env.step(action_dict)
 
-            reward_batch = np.asarray([rewards[a] for a in agent_order], dtype=np.float32)
+            reward_batch = np.asarray(
+                [rewards[a] for a in agent_order], dtype=np.float32
+            )
             latest_step_reward = float(np.mean(reward_batch))
             if infos:
-                latest_terms = dict(infos.get(agent_order[0], {}).get("reward_terms", {}))
+                latest_terms = dict(
+                    infos.get(agent_order[0], {}).get("reward_terms", {})
+                )
                 for k, v in latest_terms.items():
                     term_totals[k] = term_totals.get(k, 0.0) + float(v)
 
             if train_render_enabled and (global_steps % render_stride == 0):
-                assert renderer is not None and clock is not None and hud_font is not None
+                assert (
+                    renderer is not None and clock is not None and hud_font is not None
+                )
                 import pygame
 
                 keep_running = True
@@ -498,6 +518,9 @@ def main() -> None:
                     "recent_returns": recent_returns,
                     "recent_ep_lens": recent_ep_lens,
                     "independent_policy": not trainer.share_policy,
+                    "goal_orientation_matching": args.goal_orientation_matching,
+                    "goal_angle_tolerance": args.goal_angle_tolerance,
+                    "random_goal_theta": args.random_goal_theta,
                 },
                 checkpoint_path,
             )
@@ -538,6 +561,9 @@ def main() -> None:
             "recent_returns": recent_returns,
             "recent_ep_lens": recent_ep_lens,
             "independent_policy": not trainer.share_policy,
+            "goal_orientation_matching": args.goal_orientation_matching,
+            "goal_angle_tolerance": args.goal_angle_tolerance,
+            "random_goal_theta": args.random_goal_theta,
         },
         save_path,
     )
