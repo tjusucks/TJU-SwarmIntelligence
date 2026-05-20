@@ -29,9 +29,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--level",
         type=str,
-        default="fixed",
-        choices=["fixed", "mild", "moderate", "full"],
-        help="Randomization level.",
+        default="auto",
+        choices=["auto", "fixed", "mild", "moderate", "full"],
+        help="Randomization level (or auto-detect from checkpoint).",
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default="auto",
+        choices=["auto", "none", "1", "2", "3", "4", "5"],
+        help="Curriculum stage layout (or auto-detect from checkpoint).",
+    )
+    parser.add_argument(
+        "--random-init-theta",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Randomize cargo starting angle (or auto-detect from checkpoint).",
+    )
+    parser.add_argument(
+        "--no-obstacles",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Disable obstacles in the layout (or auto-detect from checkpoint).",
     )
     parser.add_argument("--seed", type=int, default=42, help="Base replay seed.")
     parser.add_argument("--episodes", type=int, default=3, help="Number of episodes.")
@@ -140,30 +161,36 @@ def main() -> None:
 
     # Read environment setup parameters from checkpoint config if available
     train_args = checkpoint.get("train_args", {})
-    stage = train_args.get("stage", "none")
-    no_obstacles = train_args.get("no_obstacles", False)
-    random_init_theta = train_args.get("random_init_theta", False)
+    no_obstacles_default = train_args.get("no_obstacles", False)
+    random_init_theta_default = train_args.get("random_init_theta", False)
     init_theta_min = train_args.get("init_theta_min", -np.pi)
     init_theta_max = train_args.get("init_theta_max", np.pi)
     stage3_gap_height = train_args.get("stage3_gap_height", 200.0)
     stage3_wall_width = train_args.get("stage3_wall_width", 42)
     stage4_gap_span = train_args.get("stage4_gap_span", 165.0)
     stage4_wall_width = train_args.get("stage4_wall_width", 34)
+    stage5_gap_height = train_args.get("stage5_gap_height", 200.0)
+    stage5_wall_width = train_args.get("stage5_wall_width", 42)
 
-    # Fallback to checking the filename if stage is none (for older checkpoints)
-    if stage == "none":
-        ckpt_name = ckpt_path.name.lower()
-        if "stage1" in ckpt_name:
-            stage = "1"
-        elif "stage2" in ckpt_name:
-            stage = "2"
-        elif "stage3" in ckpt_name:
-            stage = "3"
-        elif "stage4" in ckpt_name:
-            stage = "4"
+    # Determine stage
+    if args.stage != "auto":
+        stage = args.stage
+    else:
+        stage = train_args.get("stage", "none")
+        if stage == "none":
+            ckpt_name = ckpt_path.name.lower()
+            if "stage1" in ckpt_name:
+                stage = "1"
+            elif "stage2" in ckpt_name:
+                stage = "2"
+            elif "stage3" in ckpt_name:
+                stage = "3"
+            elif "stage4" in ckpt_name:
+                stage = "4"
+            elif "stage5" in ckpt_name:
+                stage = "5"
 
-    # Automatically map stage to the correct default level, obstacles, and theta config
-    level_name = args.level
+    # Map stage to standard configuration
     if stage == "1":
         level_name = "fixed"
         no_obstacles = True
@@ -172,10 +199,22 @@ def main() -> None:
         level_name = "mild"
         no_obstacles = True
         random_init_theta = True
-    elif stage in ("3", "4"):
+    elif stage in ("3", "4", "5"):
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True
+    else:
+        level_name = "fixed"
+        no_obstacles = no_obstacles_default
+        random_init_theta = random_init_theta_default
+
+    # Override level and settings if explicitly requested via command line
+    if args.level != "auto":
+        level_name = args.level
+    if args.random_init_theta != "auto":
+        random_init_theta = (args.random_init_theta == "true")
+    if args.no_obstacles != "auto":
+        no_obstacles = (args.no_obstacles == "true")
 
     level = RandomLevel(level_name)
     config = SceneGenerator(level=level).generate(
