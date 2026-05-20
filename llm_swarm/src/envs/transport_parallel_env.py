@@ -445,6 +445,8 @@ class TransportParallelEnv(ParallelEnv):
         self.agents = list(self.possible_agents)
 
         self._prev_distance = self._path_distance_to_goal()
+        self._initial_distance = self._prev_distance
+        self._steps_at_goal_position = 0
         self._build_route_guidance()
         self._prev_route_dist = self._distance_to_current_waypoint()
         self._route_stall_steps = 0
@@ -771,6 +773,7 @@ class TransportParallelEnv(ParallelEnv):
         self._prev_heading_abs_err = curr_heading_abs_err
 
         goal_heading_align_term = 0.0
+        goal_heading_step_penalty = 0.0
         if self.goal_orientation_matching:
             g_theta = getattr(self.world.obj, "goal_theta", None)
             if g_theta is not None:
@@ -785,6 +788,17 @@ class TransportParallelEnv(ParallelEnv):
                     self.goal_heading_reward_weight * goal_heading_improve
                 )
                 reward += goal_heading_align_term
+
+                # Constant step-wise orientation penalty.
+                # Applies uniformly every step to encourage early rotation
+                # during transport rather than last-second correction at goal.
+                # With w=0.03, goal_heading_reward_weight=1.0, max_err=pi:
+                #   per-step penalty ~= -0.094, over 2400 steps ~= -226
+                #   (meaningful vs ~260 progress reward, not overwhelming)
+                goal_heading_step_penalty = (
+                    -0.03 * self.goal_heading_reward_weight * curr_goal_err
+                )
+                reward += goal_heading_step_penalty
 
         prev_theta = self._prev_obj_theta
         curr_theta = float(self.world.obj.theta)
@@ -1038,6 +1052,7 @@ class TransportParallelEnv(ParallelEnv):
             "time": float(time_term),
             "heading_align": float(heading_align_term),
             "goal_heading": float(goal_heading_align_term),
+            "goal_heading_step_penalty": float(goal_heading_step_penalty),
             "rot_jam": float(rot_jam_term),
             "effective_rot": float(effective_rot_term),
             "blocked": float(blocked_term),
