@@ -111,6 +111,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-orientation-matching", action="store_true")
     parser.add_argument("--goal-angle-tolerance", type=float, default=0.2)
     parser.add_argument("--goal-heading-reward-weight", type=float, default=0.5)
+    parser.add_argument("--goal-theta-drive-radius", type=float, default=60.0)
+    parser.add_argument("--goal-theta-drive-damping-scale", type=float, default=0.3)
     parser.add_argument("--random-goal-theta", action="store_true")
     parser.add_argument("--stage3-gap-height", type=float, default=200.0)
     parser.add_argument("--stage3-wall-width", type=int, default=42)
@@ -287,6 +289,8 @@ def main() -> None:
         goal_orientation_matching=args.goal_orientation_matching,
         goal_angle_tolerance=args.goal_angle_tolerance,
         goal_heading_reward_weight=args.goal_heading_reward_weight,
+        goal_theta_drive_radius=args.goal_theta_drive_radius,
+        goal_theta_drive_damping_scale=args.goal_theta_drive_damping_scale,
         random_goal_theta=args.random_goal_theta,
         curriculum_stage=args.stage,
         stage3_gap_height=args.stage3_gap_height,

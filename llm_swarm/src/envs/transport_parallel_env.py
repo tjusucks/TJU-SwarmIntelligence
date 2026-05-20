@@ -124,6 +124,8 @@ class TransportParallelEnv(ParallelEnv):
         goal_orientation_matching: bool = False,
         goal_angle_tolerance: float = 0.2,
         goal_heading_reward_weight: float = 0.5,
+        goal_theta_drive_radius: float = 60.0,
+        goal_theta_drive_damping_scale: float = 0.3,
         random_goal_theta: bool = False,
         curriculum_stage: str = "none",
         stage3_gap_height: float = 200.0,
@@ -271,6 +273,10 @@ class TransportParallelEnv(ParallelEnv):
         self.goal_orientation_matching = bool(goal_orientation_matching)
         self.goal_angle_tolerance = float(goal_angle_tolerance)
         self.goal_heading_reward_weight = float(goal_heading_reward_weight)
+        self.goal_theta_drive_radius = float(goal_theta_drive_radius)
+        self.goal_theta_drive_damping_scale = float(
+            np.clip(goal_theta_drive_damping_scale, 0.0, 1.0)
+        )
         self.random_goal_theta = bool(random_goal_theta)
         self.curriculum_stage = curriculum_stage
         self.stage3_gap_height = stage3_gap_height
@@ -1629,14 +1635,30 @@ class TransportParallelEnv(ParallelEnv):
         base_fx = desired_vx - self.route_linear_damping_gain * obj.vx
         base_fy = desired_vy - self.route_linear_damping_gain * obj.vy
 
-        if float(np.hypot(steer_dir[0], steer_dir[1])) > 1e-6:
+        # Near-goal orientation drive: when within goal_theta_drive_radius of
+        # the goal position and goal_orientation_matching is enabled, switch
+        # theta_ref to goal_theta and relax angular damping so the residual
+        # policy can actually rotate the cargo into the target heading.
+        g_theta = getattr(obj, "goal_theta", None)
+        near_goal_dist = float(np.hypot(obj.x - obj.goal_x, obj.y - obj.goal_y))
+        use_goal_theta = bool(
+            self.goal_orientation_matching
+            and g_theta is not None
+            and near_goal_dist < self.goal_theta_drive_radius
+        )
+        if use_goal_theta:
+            theta_ref = float(g_theta)
+            damping_scale = self.goal_theta_drive_damping_scale
+        elif float(np.hypot(steer_dir[0], steer_dir[1])) > 1e-6:
             theta_ref = float(np.arctan2(steer_dir[1], steer_dir[0]))
+            damping_scale = 1.0
         else:
             theta_ref = float(obj.theta)
+            damping_scale = 1.0
         theta_err = (theta_ref - obj.theta + np.pi) % (2 * np.pi) - np.pi
         base_tau = (
             self.route_torque_gain * theta_err
-            - self.route_angular_damping_gain * obj.omega
+            - damping_scale * self.route_angular_damping_gain * obj.omega
         )
 
         if avoid_intensity > 0.0 and float(np.hypot(repel_dir[0], repel_dir[1])) > 1e-8:
