@@ -138,15 +138,51 @@ def main() -> None:
     goal_angle_tolerance = checkpoint.get("goal_angle_tolerance", 0.2)
     random_goal_theta = checkpoint.get("random_goal_theta", False)
 
-    # Or infer from obs_dim if not saved in checkpoint keys
-    if not goal_orientation_matching and obs_dim % 2 == 1:
-        # Check base dimension
-        # With default parameters, obs_dim is odd/even depending on goal_orientation_matching
-        pass
+    # Read environment setup parameters from checkpoint config if available
+    train_args = checkpoint.get("train_args", {})
+    stage = train_args.get("stage", "none")
+    no_obstacles = train_args.get("no_obstacles", False)
+    random_init_theta = train_args.get("random_init_theta", False)
+    init_theta_min = train_args.get("init_theta_min", -np.pi)
+    init_theta_max = train_args.get("init_theta_max", np.pi)
+    stage3_gap_height = train_args.get("stage3_gap_height", 200.0)
+    stage3_wall_width = train_args.get("stage3_wall_width", 42)
+    stage4_gap_span = train_args.get("stage4_gap_span", 165.0)
+    stage4_wall_width = train_args.get("stage4_wall_width", 34)
 
-    level = RandomLevel(args.level)
+    # Fallback to checking the filename if stage is none (for older checkpoints)
+    if stage == "none":
+        ckpt_name = ckpt_path.name.lower()
+        if "stage1" in ckpt_name:
+            stage = "1"
+        elif "stage2" in ckpt_name:
+            stage = "2"
+        elif "stage3" in ckpt_name:
+            stage = "3"
+        elif "stage4" in ckpt_name:
+            stage = "4"
+
+    # Automatically map stage to the correct default level, obstacles, and theta config
+    level_name = args.level
+    if stage == "1":
+        level_name = "fixed"
+        no_obstacles = True
+        random_init_theta = False
+    elif stage == "2":
+        level_name = "mild"
+        no_obstacles = True
+        random_init_theta = True
+    elif stage in ("3", "4"):
+        level_name = "fixed"
+        no_obstacles = False
+        random_init_theta = True
+
+    level = RandomLevel(level_name)
     config = SceneGenerator(level=level).generate(
         seed=args.seed,
+        random_init_theta=random_init_theta,
+        init_theta_min=init_theta_min,
+        init_theta_max=init_theta_max,
         random_goal_theta=random_goal_theta,
     )
     env = TransportParallelEnv(
@@ -156,6 +192,15 @@ def main() -> None:
         goal_orientation_matching=goal_orientation_matching,
         goal_angle_tolerance=goal_angle_tolerance,
         random_goal_theta=random_goal_theta,
+        no_obstacles=no_obstacles,
+        random_init_theta=random_init_theta,
+        init_theta_min=init_theta_min,
+        init_theta_max=init_theta_max,
+        curriculum_stage=stage,
+        stage3_gap_height=stage3_gap_height,
+        stage3_wall_width=stage3_wall_width,
+        stage4_gap_span=stage4_gap_span,
+        stage4_wall_width=stage4_wall_width,
     )
 
     agent_order = list(env.possible_agents)

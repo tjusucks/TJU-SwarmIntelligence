@@ -521,6 +521,7 @@ def main() -> None:
                     "goal_orientation_matching": args.goal_orientation_matching,
                     "goal_angle_tolerance": args.goal_angle_tolerance,
                     "random_goal_theta": args.random_goal_theta,
+                    "train_args": args.__dict__,
                 },
                 checkpoint_path,
             )
@@ -564,6 +565,7 @@ def main() -> None:
             "goal_orientation_matching": args.goal_orientation_matching,
             "goal_angle_tolerance": args.goal_angle_tolerance,
             "random_goal_theta": args.random_goal_theta,
+            "train_args": args.__dict__,
         },
         save_path,
     )
