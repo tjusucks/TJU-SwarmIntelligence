@@ -28,7 +28,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--stage", type=str, default="none", choices=["none", "1", "2", "3", "4"]
+        "--stage",
+        type=str,
+        default="none",
+        choices=["none", "1", "2", "3", "4", "5", "6"],
     )
     parser.add_argument(
         "--level",
@@ -126,6 +129,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage3-wall-width", type=int, default=42)
     parser.add_argument("--stage4-gap-span", type=float, default=165.0)
     parser.add_argument("--stage4-wall-width", type=int, default=34)
+    parser.add_argument(
+        "--cargo-preset-pool",
+        type=str,
+        default="",
+        help="Comma-separated list of cargo presets to sample per episode "
+        "(e.g. 'L,T,U'). Empty disables the pool and uses --cargo-preset.",
+    )
+    parser.add_argument(
+        "--enable-dr",
+        action="store_true",
+        help="Enable physics domain randomization (mass/inertia/damping/force).",
+    )
+    parser.add_argument("--dr-mass-low", type=float, default=0.85)
+    parser.add_argument("--dr-mass-high", type=float, default=1.15)
+    parser.add_argument("--dr-inertia-low", type=float, default=0.85)
+    parser.add_argument("--dr-inertia-high", type=float, default=1.20)
+    parser.add_argument("--dr-force-low", type=float, default=0.90)
+    parser.add_argument("--dr-force-high", type=float, default=1.10)
+    parser.add_argument("--dr-lin-damp-low", type=float, default=0.80)
+    parser.add_argument("--dr-lin-damp-high", type=float, default=0.90)
+    parser.add_argument("--dr-ang-damp-low", type=float, default=0.75)
+    parser.add_argument("--dr-ang-damp-high", type=float, default=0.85)
+    parser.add_argument("--dr-wall-slide-low", type=float, default=0.80)
+    parser.add_argument("--dr-wall-slide-high", type=float, default=0.95)
+    parser.add_argument(
+        "--disturbance-prob",
+        type=float,
+        default=0.0,
+        help="Per-step probability of applying a random velocity impulse "
+        "to the cargo. Used by stage 6 stress-test.",
+    )
+    parser.add_argument("--disturbance-force-low", type=float, default=60.0)
+    parser.add_argument("--disturbance-force-high", type=float, default=160.0)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--ent-coef", type=float, default=0.01)
     parser.add_argument("--action-std-init", type=float, default=0.35)
@@ -227,6 +263,12 @@ def main() -> None:
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True
+    elif args.stage == "5" or args.stage == "6":
+        # Stage 5/6 build obstacles inside the env layout helper; the
+        # generator stays in FIXED mode so it does not override placements.
+        level_name = "fixed"
+        no_obstacles = False
+        random_init_theta = True
 
     level = RandomLevel(level_name)
 
@@ -307,6 +349,22 @@ def main() -> None:
         stage3_wall_width=args.stage3_wall_width,
         stage4_gap_span=args.stage4_gap_span,
         stage4_wall_width=args.stage4_wall_width,
+        cargo_preset_pool=(
+            [s.strip() for s in args.cargo_preset_pool.split(",") if s.strip()]
+            or None
+        ),
+        enable_domain_randomization=args.enable_dr,
+        dr_mass_range=(args.dr_mass_low, args.dr_mass_high),
+        dr_inertia_range=(args.dr_inertia_low, args.dr_inertia_high),
+        dr_force_max_range=(args.dr_force_low, args.dr_force_high),
+        dr_linear_damping_range=(args.dr_lin_damp_low, args.dr_lin_damp_high),
+        dr_angular_damping_range=(args.dr_ang_damp_low, args.dr_ang_damp_high),
+        dr_wall_slide_range=(args.dr_wall_slide_low, args.dr_wall_slide_high),
+        disturbance_prob=args.disturbance_prob,
+        disturbance_force_range=(
+            args.disturbance_force_low,
+            args.disturbance_force_high,
+        ),
     )
 
     agent_order = list(env.possible_agents)

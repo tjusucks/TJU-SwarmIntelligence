@@ -11,7 +11,13 @@ from pettingzoo import ParallelEnv
 
 from src.control.force_allocator import allocate_wrench_to_robots
 from src.planning.path_planner import plan_path
-from src.sim.scene_config import CargoPreset, RandomLevel, SceneConfig, SceneGenerator
+from src.sim.scene_config import (
+    CARGO_PRESETS,
+    CargoPreset,
+    RandomLevel,
+    SceneConfig,
+    SceneGenerator,
+)
 from src.sim.world import World
 
 
@@ -134,6 +140,16 @@ class TransportParallelEnv(ParallelEnv):
         stage3_wall_width: int = 42,
         stage4_gap_span: float = 165.0,
         stage4_wall_width: int = 34,
+        cargo_preset_pool: list[str] | None = None,
+        enable_domain_randomization: bool = False,
+        dr_mass_range: tuple[float, float] = (0.85, 1.15),
+        dr_inertia_range: tuple[float, float] = (0.85, 1.20),
+        dr_force_max_range: tuple[float, float] = (0.90, 1.10),
+        dr_linear_damping_range: tuple[float, float] = (0.80, 0.90),
+        dr_angular_damping_range: tuple[float, float] = (0.75, 0.85),
+        dr_wall_slide_range: tuple[float, float] = (0.80, 0.95),
+        disturbance_prob: float = 0.0,
+        disturbance_force_range: tuple[float, float] = (60.0, 160.0),
         recovery_push_gain: float = 0.45,
         recovery_torque_gain: float = 180.0,
         recovery_stuck_steps: int = 25,
@@ -291,6 +307,29 @@ class TransportParallelEnv(ParallelEnv):
         self.stage3_wall_width = stage3_wall_width
         self.stage4_gap_span = stage4_gap_span
         self.stage4_wall_width = stage4_wall_width
+        # Validate cargo preset pool against known presets.
+        if cargo_preset_pool:
+            valid = {p.value for p in CargoPreset}
+            bad = [p for p in cargo_preset_pool if p not in valid]
+            if bad:
+                raise ValueError(
+                    f"Unknown cargo presets in pool: {bad}. "
+                    f"Expected subset of: {sorted(valid)}."
+                )
+            self.cargo_preset_pool = list(cargo_preset_pool)
+        else:
+            self.cargo_preset_pool = None
+        self.enable_domain_randomization = bool(enable_domain_randomization)
+        self.dr_mass_range = tuple(dr_mass_range)
+        self.dr_inertia_range = tuple(dr_inertia_range)
+        self.dr_force_max_range = tuple(dr_force_max_range)
+        self.dr_linear_damping_range = tuple(dr_linear_damping_range)
+        self.dr_angular_damping_range = tuple(dr_angular_damping_range)
+        self.dr_wall_slide_range = tuple(dr_wall_slide_range)
+        self.disturbance_prob = float(np.clip(disturbance_prob, 0.0, 1.0))
+        self.disturbance_force_range = tuple(disturbance_force_range)
+        # Snapshot the nominal force_max so DR can rescale per-episode.
+        self._base_force_max = float(force_max)
         self.recovery_push_gain = recovery_push_gain
         self.recovery_torque_gain = recovery_torque_gain
         self.recovery_stuck_steps = recovery_stuck_steps
@@ -432,11 +471,27 @@ class TransportParallelEnv(ParallelEnv):
             self._apply_stage3_layout(config)
         elif self.curriculum_stage == "4":
             self._apply_stage4_layout(config)
+        elif self.curriculum_stage == "5":
+            self._apply_stage5_layout(config)
+        elif self.curriculum_stage == "6":
+            self._apply_stage6_layout(config)
 
         if self.no_obstacles:
             config.obstacles = []
         config.wall_slide_gain = self.wall_slide_gain
         config.goal_angle_tolerance = self.goal_angle_tolerance
+
+        # Optional cargo-shape randomization: overrides fixed_cargo_preset.
+        # Validity is re-checked against obstacles via a small rejection loop.
+        if self.cargo_preset_pool:
+            self._apply_cargo_pool(config)
+
+        # Optional physics domain randomization: rescale dynamics per episode.
+        if self.enable_domain_randomization:
+            self._apply_physics_domain_randomization(config)
+        else:
+            # Restore nominal force_max when DR is off.
+            self.force_max = self._base_force_max
 
         if getattr(config, "cargo_theta", None) is None:
             if self.random_init_theta:
@@ -614,6 +669,11 @@ class TransportParallelEnv(ParallelEnv):
             attached_count += 1
         if attached_count > 0:
             mean_cmd_vec /= float(attached_count)
+
+        # Optional external disturbance applied as a velocity impulse on the
+        # cargo. Used by stage 6 to stress-test policy robustness.
+        if self.disturbance_prob > 0.0 and np.random.random() < self.disturbance_prob:
+            self._apply_random_disturbance()
 
         self.world.step(self.dt)
         self._step_count += 1
@@ -1405,6 +1465,191 @@ class TransportParallelEnv(ParallelEnv):
                 float(self.milestone_reward),
             ),
         ]
+
+    def _apply_stage5_layout(self, config: SceneConfig) -> None:
+        """Stage 5: random obstacle template + free start/goal placement.
+
+        Picks a template (corridor / gate / pillars / chicane) and lets the
+        cargo/goal be sampled by the underlying generator. Milestones are
+        cleared because the entry/exit geometry varies per template.
+        """
+        rng = np.random.default_rng(int(getattr(config, "seed", 42)) ^ 0xA51E)
+        w = float(config.width)
+        h = float(config.height)
+
+        templates = ["gate", "corridor", "pillars", "chicane"]
+        template = str(rng.choice(templates))
+        obstacles = self._build_obstacle_template(rng, template, w, h, hard=False)
+        config.obstacles = obstacles
+
+        # Spread start/goal along the diagonal with jitter; rejection sample
+        # to avoid placing inside obstacles.
+        config.cargo_x, config.cargo_y = self._sample_free_point(
+            rng, obstacles, w, h, x_range=(0.10 * w, 0.35 * w)
+        )
+        config.goal_x, config.goal_y = self._sample_free_point(
+            rng, obstacles, w, h, x_range=(0.65 * w, 0.90 * w)
+        )
+        self._milestones = []
+
+    def _apply_stage6_layout(self, config: SceneConfig) -> None:
+        """Stage 6: harder templates + denser obstacles + opposite corners."""
+        rng = np.random.default_rng(int(getattr(config, "seed", 42)) ^ 0xB60F)
+        w = float(config.width)
+        h = float(config.height)
+
+        templates = ["double_gate", "chicane", "corridor", "pillars_dense"]
+        template = str(rng.choice(templates))
+        obstacles = self._build_obstacle_template(rng, template, w, h, hard=True)
+        config.obstacles = obstacles
+
+        # Opposite-corner start/goal for stage 6 to require long routes.
+        if rng.random() < 0.5:
+            x_lo, x_hi = (0.08 * w, 0.22 * w), (0.78 * w, 0.92 * w)
+            y_lo, y_hi = (0.10 * h, 0.30 * h), (0.70 * h, 0.90 * h)
+        else:
+            x_lo, x_hi = (0.78 * w, 0.92 * w), (0.08 * w, 0.22 * w)
+            y_lo, y_hi = (0.10 * h, 0.30 * h), (0.70 * h, 0.90 * h)
+        config.cargo_x, config.cargo_y = self._sample_free_point(
+            rng, obstacles, w, h, x_range=x_lo, y_range=y_lo
+        )
+        config.goal_x, config.goal_y = self._sample_free_point(
+            rng, obstacles, w, h, x_range=x_hi, y_range=y_hi
+        )
+        self._milestones = []
+
+    def _build_obstacle_template(
+        self,
+        rng: np.random.Generator,
+        template: str,
+        w: float,
+        h: float,
+        hard: bool,
+    ) -> list[tuple[int, int, int, int]]:
+        """Build a list of obstacle AABBs for a named template."""
+        margin = 80.0
+        out: list[tuple[int, int, int, int]] = []
+
+        if template == "gate":
+            wall_w = int(rng.integers(28, 46 if not hard else 40))
+            gap_h = float(rng.uniform(180.0, 240.0 if not hard else 200.0))
+            wall_x = int(rng.uniform(0.40 * w, 0.60 * w))
+            gap_cy = float(rng.uniform(0.30 * h, 0.70 * h))
+            gap_top = int(np.clip(gap_cy - 0.5 * gap_h, margin, h - margin))
+            gap_bot = int(np.clip(gap_cy + 0.5 * gap_h, margin, h - margin))
+            if gap_top > 0:
+                out.append((wall_x, 0, wall_w, gap_top))
+            if gap_bot < int(h):
+                out.append((wall_x, gap_bot, wall_w, int(h) - gap_bot))
+
+        elif template == "double_gate":
+            wall_w = int(rng.integers(26, 38))
+            gap_h = float(rng.uniform(140.0, 200.0))
+            wall_x1 = int(rng.uniform(0.30 * w, 0.42 * w))
+            wall_x2 = int(rng.uniform(0.58 * w, 0.72 * w))
+            for wx in (wall_x1, wall_x2):
+                gap_cy = float(rng.uniform(0.25 * h, 0.75 * h))
+                gap_top = int(np.clip(gap_cy - 0.5 * gap_h, margin, h - margin))
+                gap_bot = int(np.clip(gap_cy + 0.5 * gap_h, margin, h - margin))
+                if gap_top > 0:
+                    out.append((wx, 0, wall_w, gap_top))
+                if gap_bot < int(h):
+                    out.append((wx, gap_bot, wall_w, int(h) - gap_bot))
+
+        elif template == "corridor":
+            corr_h = float(rng.uniform(180.0, 260.0))
+            wall_t = int(rng.integers(24, 36))
+            corr_cy = float(rng.uniform(0.35 * h, 0.65 * h))
+            top_y = int(corr_cy - 0.5 * corr_h)
+            bot_y = int(corr_cy + 0.5 * corr_h)
+            x_lo = int(rng.uniform(0.25 * w, 0.35 * w))
+            x_hi = int(rng.uniform(0.65 * w, 0.75 * w))
+            out.append((x_lo, max(0, top_y - wall_t), x_hi - x_lo, wall_t))
+            out.append((x_lo, bot_y, x_hi - x_lo, wall_t))
+
+        elif template == "chicane":
+            wall_t = int(rng.integers(24, 34))
+            seg_w = float(rng.uniform(0.30 * w, 0.42 * w))
+            y1 = int(rng.uniform(0.30 * h, 0.42 * h))
+            y2 = int(rng.uniform(0.58 * h, 0.70 * h))
+            out.append((0, y1, int(seg_w), wall_t))
+            x_start = int(w - seg_w)
+            out.append((x_start, y2, int(seg_w), wall_t))
+
+        elif template in {"pillars", "pillars_dense"}:
+            n = int(rng.integers(3, 6 if template == "pillars" else 8))
+            for _ in range(n):
+                if rng.random() < 0.5:
+                    pw = int(rng.integers(60, 160))
+                    ph = int(rng.integers(20, 40))
+                else:
+                    pw = int(rng.integers(20, 40))
+                    ph = int(rng.integers(60, 160))
+                ox = int(rng.uniform(margin, w - margin - pw))
+                oy = int(rng.uniform(margin, h - margin - ph))
+                out.append((ox, oy, pw, ph))
+
+        return out
+
+    def _sample_free_point(
+        self,
+        rng: np.random.Generator,
+        obstacles: list[tuple[int, int, int, int]],
+        w: float,
+        h: float,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float] | None = None,
+        clearance: float = 70.0,
+        max_attempts: int = 80,
+    ) -> tuple[float, float]:
+        """Rejection-sample a point with sufficient clearance from obstacles."""
+        y_lo, y_hi = y_range if y_range is not None else (80.0, h - 80.0)
+        for _ in range(max_attempts):
+            x = float(rng.uniform(x_range[0], x_range[1]))
+            y = float(rng.uniform(y_lo, y_hi))
+            ok = True
+            for ox, oy, ow, oh in obstacles:
+                cx = float(np.clip(x, ox, ox + ow))
+                cy = float(np.clip(y, oy, oy + oh))
+                if float(np.hypot(x - cx, y - cy)) < clearance:
+                    ok = False
+                    break
+            if ok:
+                return x, y
+        # Fallback: return midpoint of x_range with safe y.
+        return (
+            float(0.5 * (x_range[0] + x_range[1])),
+            float(0.5 * (y_lo + y_hi)),
+        )
+
+    def _apply_cargo_pool(self, config: SceneConfig) -> None:
+        """Randomly select a cargo preset from the configured pool."""
+        choice = str(np.random.choice(self.cargo_preset_pool))
+        config.cargo_preset = choice
+
+    def _apply_physics_domain_randomization(self, config: SceneConfig) -> None:
+        """Perturb mass / inertia / damping / wall slide / force_max per episode."""
+        preset = CARGO_PRESETS[config.cargo_preset]
+        base_mass = float(config.cargo_mass or preset["mass"])
+        base_inertia = float(config.cargo_inertia or preset["inertia"])
+        config.cargo_mass = base_mass * float(np.random.uniform(*self.dr_mass_range))
+        config.cargo_inertia = base_inertia * float(
+            np.random.uniform(*self.dr_inertia_range)
+        )
+        config.linear_damping = float(np.random.uniform(*self.dr_linear_damping_range))
+        config.angular_damping = float(np.random.uniform(*self.dr_angular_damping_range))
+        config.wall_slide_gain = float(np.random.uniform(*self.dr_wall_slide_range))
+        self.force_max = self._base_force_max * float(
+            np.random.uniform(*self.dr_force_max_range)
+        )
+
+    def _apply_random_disturbance(self) -> None:
+        """Apply a one-step random velocity impulse to the cargo."""
+        ang = float(np.random.uniform(-np.pi, np.pi))
+        mag = float(np.random.uniform(*self.disturbance_force_range))
+        mass = max(1e-6, float(self.world.obj.mass))
+        self.world.obj.vx += float(np.cos(ang)) * mag / mass * self.dt
+        self.world.obj.vy += float(np.sin(ang)) * mag / mass * self.dt
 
     def _build_route_guidance(self) -> None:
         obj = self.world.obj
