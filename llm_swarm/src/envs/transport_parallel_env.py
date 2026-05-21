@@ -126,6 +126,8 @@ class TransportParallelEnv(ParallelEnv):
         goal_heading_reward_weight: float = 0.5,
         goal_theta_drive_radius: float = 60.0,
         goal_theta_drive_damping_scale: float = 0.3,
+        goal_heading_step_penalty_weight: float = 0.03,
+        goal_heading_near_goal_multiplier: float = 1.0,
         random_goal_theta: bool = False,
         curriculum_stage: str = "none",
         stage3_gap_height: float = 200.0,
@@ -276,6 +278,12 @@ class TransportParallelEnv(ParallelEnv):
         self.goal_theta_drive_radius = float(goal_theta_drive_radius)
         self.goal_theta_drive_damping_scale = float(
             np.clip(goal_theta_drive_damping_scale, 0.0, 1.0)
+        )
+        self.goal_heading_step_penalty_weight = max(
+            0.0, float(goal_heading_step_penalty_weight)
+        )
+        self.goal_heading_near_goal_multiplier = max(
+            0.0, float(goal_heading_near_goal_multiplier)
         )
         self.random_goal_theta = bool(random_goal_theta)
         self.curriculum_stage = curriculum_stage
@@ -795,14 +803,22 @@ class TransportParallelEnv(ParallelEnv):
                 )
                 reward += goal_heading_align_term
 
-                # Constant step-wise orientation penalty.
-                # Applies uniformly every step to encourage early rotation
-                # during transport rather than last-second correction at goal.
-                # With w=0.03, goal_heading_reward_weight=1.0, max_err=pi:
-                #   per-step penalty ~= -0.094, over 2400 steps ~= -226
-                #   (meaningful vs ~260 progress reward, not overwhelming)
+                # Step-wise orientation penalty, configurable via
+                # goal_heading_step_penalty_weight (default 0.03). When the
+                # cargo is within goal_theta_drive_radius of the goal position,
+                # multiply by goal_heading_near_goal_multiplier so the policy
+                # pays a much stronger price for failing to rotate at the goal.
+                near_goal_penalty_dist = self._distance_to_goal()
+                near_goal_mult = (
+                    self.goal_heading_near_goal_multiplier
+                    if near_goal_penalty_dist < self.goal_theta_drive_radius
+                    else 1.0
+                )
                 goal_heading_step_penalty = (
-                    -0.03 * self.goal_heading_reward_weight * curr_goal_err
+                    -self.goal_heading_step_penalty_weight
+                    * near_goal_mult
+                    * self.goal_heading_reward_weight
+                    * curr_goal_err
                 )
                 reward += goal_heading_step_penalty
 

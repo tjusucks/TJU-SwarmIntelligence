@@ -58,7 +58,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-penalty", type=float, default=0.0)
     parser.add_argument("--stagnation-penalty-weight", type=float, default=0.02)
     parser.add_argument("--away-penalty-weight", type=float, default=0.0)
-    parser.add_argument("--heading-reward-weight", type=float, default=0.0)
     parser.add_argument("--action-penalty-weight", type=float, default=0.0)
     parser.add_argument("--clearance-penalty-weight", type=float, default=0.025)
     parser.add_argument("--clearance-safe-distance", type=float, default=90.0)
@@ -113,6 +112,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-heading-reward-weight", type=float, default=0.5)
     parser.add_argument("--goal-theta-drive-radius", type=float, default=60.0)
     parser.add_argument("--goal-theta-drive-damping-scale", type=float, default=0.3)
+    parser.add_argument("--goal-heading-step-penalty-weight", type=float, default=0.03)
+    parser.add_argument("--goal-heading-near-goal-multiplier", type=float, default=1.0)
+    parser.add_argument("--heading-reward-weight", type=float, default=0.8)
+    parser.add_argument(
+        "--reset-log-std",
+        action="store_true",
+        help="After loading checkpoint, re-initialize log_std to action_std_init "
+        "so the policy can re-explore (useful when prior stage collapsed sigma).",
+    )
     parser.add_argument("--random-goal-theta", action="store_true")
     parser.add_argument("--stage3-gap-height", type=float, default=200.0)
     parser.add_argument("--stage3-wall-width", type=int, default=42)
@@ -291,6 +299,8 @@ def main() -> None:
         goal_heading_reward_weight=args.goal_heading_reward_weight,
         goal_theta_drive_radius=args.goal_theta_drive_radius,
         goal_theta_drive_damping_scale=args.goal_theta_drive_damping_scale,
+        goal_heading_step_penalty_weight=args.goal_heading_step_penalty_weight,
+        goal_heading_near_goal_multiplier=args.goal_heading_near_goal_multiplier,
         random_goal_theta=args.random_goal_theta,
         curriculum_stage=args.stage,
         stage3_gap_height=args.stage3_gap_height,
@@ -370,6 +380,25 @@ def main() -> None:
             f"Resumed training at step {global_steps}, update {update_idx}, "
             f"completed {total_completed_episodes} episodes."
         )
+
+        if args.reset_log_std:
+            from src.agents.ippo import ActorCritic, IndependentPolicies
+
+            target = float(np.log(args.action_std_init))
+            reset_count = 0
+            with torch.no_grad():
+                if isinstance(trainer.model, IndependentPolicies):
+                    for agent_id, m in trainer.model.models.items():
+                        m.log_std.fill_(target)
+                        reset_count += 1
+                elif isinstance(trainer.model, ActorCritic):
+                    trainer.model.log_std.fill_(target)
+                    reset_count = 1
+            print(
+                f"Reset log_std to {target:.4f} "
+                f"(sigma={args.action_std_init:.3f}) "
+                f"across {reset_count} actor(s) to revive exploration."
+            )
 
     while global_steps < args.total_steps:
         for _ in range(cfg.rollout_steps):
