@@ -70,6 +70,22 @@ PROFILES: list[StageProfile] = [
         stage4_gap_span=160.0,
         stage4_wall_width=36,
     ),
+    StageProfile(
+        stage="5",
+        title="Stage 5",
+        subtitle="Random obstacle template (gate / corridor / pillars / chicane)",
+        level=RandomLevel.FIXED,
+        no_obstacles=False,
+        random_init_theta=True,
+    ),
+    StageProfile(
+        stage="6",
+        title="Stage 6",
+        subtitle="Harder templates, denser obstacles, opposite-corner start/goal",
+        level=RandomLevel.FIXED,
+        no_obstacles=False,
+        random_init_theta=True,
+    ),
 ]
 
 
@@ -111,7 +127,9 @@ def draw_title_bar(screen: pygame.Surface, title: str, subtitle: str) -> None:
     screen.blit(t2, (16, 42))
 
 
-def save_stage_image(out_dir: Path, profile: StageProfile, seed: int) -> Path:
+def save_stage_image(
+    out_dir: Path, profile: StageProfile, seed: int, suffix: str = ""
+) -> Path:
     """Render and save one stage map image."""
     env = build_env(profile, seed)
     w, h = env.world.width, env.world.height
@@ -121,7 +139,8 @@ def save_stage_image(out_dir: Path, profile: StageProfile, seed: int) -> Path:
     renderer.draw()
     draw_title_bar(screen, profile.title, profile.subtitle)
 
-    out_path = out_dir / f"stage_{profile.stage}.png"
+    fname = f"stage_{profile.stage}{suffix}.png"
+    out_path = out_dir / fname
     pygame.image.save(screen, str(out_path))
     env.close()
     return out_path
@@ -141,6 +160,21 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Base seed for deterministic stage snapshots.",
     )
+    parser.add_argument(
+        "--samples-per-stage",
+        type=int,
+        default=1,
+        help="How many randomized snapshots to generate per stage "
+        "(useful for stage 5/6 which pick random templates).",
+    )
+    parser.add_argument(
+        "--stages",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Restrict to specific stages, e.g. --stages 5 6. "
+        "Default = all stages defined in PROFILES.",
+    )
     return parser.parse_args()
 
 
@@ -153,10 +187,20 @@ def main() -> None:
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     pygame.init()
 
+    selected = (
+        [p for p in PROFILES if p.stage in set(args.stages)]
+        if args.stages
+        else PROFILES
+    )
+    samples = max(1, int(args.samples_per_stage))
+
     try:
-        for idx, profile in enumerate(PROFILES):
-            out = save_stage_image(out_dir, profile, seed=args.base_seed + idx)
-            print(f"Generated: {out}")
+        for idx, profile in enumerate(selected):
+            for k in range(samples):
+                seed = args.base_seed + idx * 100 + k
+                suffix = "" if samples == 1 else f"_s{k}"
+                out = save_stage_image(out_dir, profile, seed=seed, suffix=suffix)
+                print(f"Generated: {out}")
     finally:
         pygame.quit()
 

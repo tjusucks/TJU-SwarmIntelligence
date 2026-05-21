@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
         "--stage",
         type=str,
         default="auto",
-        choices=["auto", "none", "1", "2", "3", "4", "5"],
+        choices=["auto", "none", "1", "2", "3", "4", "5", "6"],
         help="Curriculum stage layout (or auto-detect from checkpoint).",
     )
     parser.add_argument(
@@ -46,6 +46,25 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         choices=["auto", "true", "false"],
         help="Randomize cargo starting angle (or auto-detect from checkpoint).",
+    )
+    parser.add_argument(
+        "--random-goal-theta",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Randomize target goal angle (or auto-detect from checkpoint).",
+    )
+    parser.add_argument(
+        "--goal-theta",
+        type=float,
+        default=None,
+        help="Fixed target goal angle in radians. Overrides --random-goal-theta.",
+    )
+    parser.add_argument(
+        "--goal-theta-deg",
+        type=float,
+        default=None,
+        help="Fixed target goal angle in degrees. Overrides --random-goal-theta.",
     )
     parser.add_argument(
         "--no-obstacles",
@@ -158,6 +177,15 @@ def main() -> None:
     goal_orientation_matching = checkpoint.get("goal_orientation_matching", False)
     goal_angle_tolerance = checkpoint.get("goal_angle_tolerance", 0.2)
     random_goal_theta = checkpoint.get("random_goal_theta", False)
+    if args.random_goal_theta != "auto":
+        random_goal_theta = args.random_goal_theta == "true"
+    fixed_goal_theta = None
+    if args.goal_theta is not None:
+        fixed_goal_theta = float(args.goal_theta)
+        random_goal_theta = False
+    if args.goal_theta_deg is not None:
+        fixed_goal_theta = float(np.deg2rad(args.goal_theta_deg))
+        random_goal_theta = False
 
     # Read environment setup parameters from checkpoint config if available
     train_args = checkpoint.get("train_args", {})
@@ -189,6 +217,8 @@ def main() -> None:
                 stage = "4"
             elif "stage5" in ckpt_name:
                 stage = "5"
+            elif "stage6" in ckpt_name:
+                stage = "6"
 
     # Map stage to standard configuration
     if stage == "1":
@@ -199,7 +229,7 @@ def main() -> None:
         level_name = "mild"
         no_obstacles = True
         random_init_theta = True
-    elif stage in ("3", "4", "5"):
+    elif stage in ("3", "4", "5", "6"):
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True
@@ -224,6 +254,8 @@ def main() -> None:
         init_theta_max=init_theta_max,
         random_goal_theta=random_goal_theta,
     )
+    if fixed_goal_theta is not None:
+        config.goal_theta = fixed_goal_theta
     env = TransportParallelEnv(
         config=config,
         random_level=level,

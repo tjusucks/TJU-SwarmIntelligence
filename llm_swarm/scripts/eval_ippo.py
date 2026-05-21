@@ -16,16 +16,16 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.agents.ippo import ActorCritic
+from src.agents.ippo import ActorCritic, IndependentPolicies
 from src.envs.transport_parallel_env import TransportParallelEnv
-from src.sim.scene_config import RandomLevel
+from src.sim.scene_config import RandomLevel, SceneGenerator
 
 
 def parse_args() -> argparse.Namespace:
     """Parse evaluation arguments."""
     parser = argparse.ArgumentParser(description="Evaluate a trained IPPO checkpoint.")
     parser.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint.")
-    parser.add_argument("--stage", type=str, default="none", choices=["none", "1", "2", "3", "4"])
+    parser.add_argument("--stage", type=str, default="none", choices=["none", "1", "2", "3", "4", "5", "6"])
     parser.add_argument(
         "--level",
         type=str,
@@ -110,6 +110,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage3-wall-width", type=int, default=42)
     parser.add_argument("--stage4-gap-span", type=float, default=165.0)
     parser.add_argument("--stage4-wall-width", type=int, default=34)
+    # ---- Orientation / goal-theta options (Phase 1/2 features) -------------
+    parser.add_argument(
+        "--goal-orientation-matching",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Require theta match for success (auto = read from checkpoint).",
+    )
+    parser.add_argument(
+        "--goal-angle-tolerance",
+        type=float,
+        default=None,
+        help="Override goal angle tolerance in radians (auto = from checkpoint).",
+    )
+    parser.add_argument(
+        "--random-goal-theta",
+        type=str,
+        default="auto",
+        choices=["auto", "true", "false"],
+        help="Randomize target goal angle (auto = read from checkpoint).",
+    )
+    parser.add_argument(
+        "--goal-theta",
+        type=float,
+        default=None,
+        help="Fixed target goal angle in radians. Overrides --random-goal-theta.",
+    )
+    parser.add_argument(
+        "--goal-theta-deg",
+        type=float,
+        default=None,
+        help="Fixed target goal angle in degrees. Overrides --random-goal-theta.",
+    )
+    parser.add_argument("--goal-heading-reward-weight", type=float, default=None)
+    parser.add_argument("--goal-theta-drive-radius", type=float, default=None)
+    parser.add_argument("--goal-theta-drive-damping-scale", type=float, default=None)
+    parser.add_argument("--goal-heading-step-penalty-weight", type=float, default=None)
+    parser.add_argument("--goal-heading-near-goal-multiplier", type=float, default=None)
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--render", action="store_true", help="Enable Pygame replay.")
     parser.add_argument("--fps", type=int, default=120, help="Replay FPS when --render is enabled.")
@@ -188,22 +226,112 @@ def main() -> None:
     obs_dim = int(checkpoint["obs_dim"])
     action_dim = int(checkpoint["action_dim"])
     cfg = checkpoint.get("config", {})
+    train_args = checkpoint.get("train_args", {})
 
     hidden_size = int(cfg.get("hidden_size", 256))
     action_std_init = float(cfg.get("action_std_init", 0.6))
     log_std_min = float(cfg.get("log_std_min", -1.2))
     log_std_max = float(cfg.get("log_std_max", 0.8))
 
-    model = ActorCritic(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        hidden_size=hidden_size,
-        action_std_init=action_std_init,
-        log_std_min=log_std_min,
-        log_std_max=log_std_max,
-    ).to(device)
+    # Auto-detect independent vs shared policy from state-dict keys.
+    is_independent = any(k.startswith("models.") for k in checkpoint["model"].keys())
+    if is_independent:
+        if "agent_order" in checkpoint:
+            ckpt_agent_order = list(checkpoint["agent_order"])
+        else:
+            agent_ids_set: set[str] = set()
+            for k in checkpoint["model"].keys():
+                if k.startswith("models."):
+                    agent_ids_set.add(k.split(".")[1])
+            ckpt_agent_order = sorted(agent_ids_set)
+        model: ActorCritic | IndependentPolicies = IndependentPolicies(
+            agent_ids=ckpt_agent_order,
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            hidden_size=hidden_size,
+            action_std_init=action_std_init,
+            log_std_min=log_std_min,
+            log_std_max=log_std_max,
+        ).to(device)
+    else:
+        model = ActorCritic(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            hidden_size=hidden_size,
+            action_std_init=action_std_init,
+            log_std_min=log_std_min,
+            log_std_max=log_std_max,
+        ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
+
+    # ---- Resolve orientation / goal-theta settings (CLI overrides ckpt) ----
+    ckpt_goal_orientation = bool(
+        checkpoint.get("goal_orientation_matching", False)
+    )
+    ckpt_goal_angle_tol = float(
+        checkpoint.get("goal_angle_tolerance", 0.2)
+    )
+    ckpt_random_goal_theta = bool(
+        checkpoint.get("random_goal_theta", False)
+    )
+
+    if args.goal_orientation_matching == "auto":
+        goal_orientation_matching = ckpt_goal_orientation
+    else:
+        goal_orientation_matching = args.goal_orientation_matching == "true"
+
+    goal_angle_tolerance = (
+        ckpt_goal_angle_tol if args.goal_angle_tolerance is None
+        else float(args.goal_angle_tolerance)
+    )
+
+    if args.random_goal_theta == "auto":
+        random_goal_theta = ckpt_random_goal_theta
+    else:
+        random_goal_theta = args.random_goal_theta == "true"
+
+    fixed_goal_theta: float | None = None
+    if args.goal_theta is not None:
+        fixed_goal_theta = float(args.goal_theta)
+        random_goal_theta = False
+    if args.goal_theta_deg is not None:
+        fixed_goal_theta = float(np.deg2rad(args.goal_theta_deg))
+        random_goal_theta = False
+
+    # ---- Resolve Phase 1/2 reward tuning knobs (CLI overrides ckpt) -------
+    def _ta_float(key: str, fallback: float) -> float:
+        val = train_args.get(key, fallback)
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return fallback
+
+    goal_heading_reward_weight = (
+        _ta_float("goal_heading_reward_weight", 0.5)
+        if args.goal_heading_reward_weight is None
+        else args.goal_heading_reward_weight
+    )
+    goal_theta_drive_radius = (
+        _ta_float("goal_theta_drive_radius", 60.0)
+        if args.goal_theta_drive_radius is None
+        else args.goal_theta_drive_radius
+    )
+    goal_theta_drive_damping_scale = (
+        _ta_float("goal_theta_drive_damping_scale", 0.3)
+        if args.goal_theta_drive_damping_scale is None
+        else args.goal_theta_drive_damping_scale
+    )
+    goal_heading_step_penalty_weight = (
+        _ta_float("goal_heading_step_penalty_weight", 0.03)
+        if args.goal_heading_step_penalty_weight is None
+        else args.goal_heading_step_penalty_weight
+    )
+    goal_heading_near_goal_multiplier = (
+        _ta_float("goal_heading_near_goal_multiplier", 1.0)
+        if args.goal_heading_near_goal_multiplier is None
+        else args.goal_heading_near_goal_multiplier
+    )
 
     level_name = args.level
     no_obstacles = args.no_obstacles
@@ -216,14 +344,28 @@ def main() -> None:
         level_name = "mild"
         no_obstacles = True
         random_init_theta = True
-    elif args.stage == "3" or args.stage == "4":
+    elif args.stage in ("3", "4", "5", "6"):
         level_name = "fixed"
         no_obstacles = False
         random_init_theta = True
 
     level = RandomLevel(level_name)
+
+    # Pre-build a SceneConfig so we can pin goal_theta when requested.
+    init_theta_min = float(train_args.get("init_theta_min", -np.pi))
+    init_theta_max = float(train_args.get("init_theta_max", np.pi))
+    scene_config = SceneGenerator(level=level).generate(
+        seed=args.seed,
+        random_init_theta=random_init_theta,
+        init_theta_min=init_theta_min,
+        init_theta_max=init_theta_max,
+        random_goal_theta=random_goal_theta,
+    )
+    if fixed_goal_theta is not None:
+        scene_config.goal_theta = fixed_goal_theta
+
     env = TransportParallelEnv(
-        config=None,
+        config=scene_config,
         random_level=level,
         max_steps=args.max_episode_steps,
         force_max=args.force_max,
@@ -264,8 +406,8 @@ def main() -> None:
         recovery_stuck_steps=args.recovery_stuck_steps,
         unblock_reward_weight=args.unblock_reward_weight,
         clearance_improve_reward_weight=args.clearance_improve_reward_weight,
-            milestone_reward=args.milestone_reward,
-            milestone_radius=args.milestone_radius,
+        milestone_reward=args.milestone_reward,
+        milestone_radius=args.milestone_radius,
         near_goal_radius=args.near_goal_radius,
         near_goal_speed_penalty_weight=args.near_goal_speed_penalty_weight,
         wall_slide_gain=args.wall_slide_gain,
@@ -284,8 +426,16 @@ def main() -> None:
         route_angular_damping_gain=args.route_angular_damping_gain,
         no_obstacles=no_obstacles,
         random_init_theta=random_init_theta,
-        init_theta_min=args.init_theta_min,
-        init_theta_max=args.init_theta_max,
+        init_theta_min=init_theta_min,
+        init_theta_max=init_theta_max,
+        goal_orientation_matching=goal_orientation_matching,
+        goal_angle_tolerance=goal_angle_tolerance,
+        goal_heading_reward_weight=goal_heading_reward_weight,
+        random_goal_theta=random_goal_theta,
+        goal_theta_drive_radius=goal_theta_drive_radius,
+        goal_theta_drive_damping_scale=goal_theta_drive_damping_scale,
+        goal_heading_step_penalty_weight=goal_heading_step_penalty_weight,
+        goal_heading_near_goal_multiplier=goal_heading_near_goal_multiplier,
         curriculum_stage=args.stage,
         stage3_gap_height=args.stage3_gap_height,
         stage3_wall_width=args.stage3_wall_width,
