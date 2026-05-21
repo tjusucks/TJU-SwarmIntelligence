@@ -76,6 +76,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Base replay seed.")
     parser.add_argument("--episodes", type=int, default=3, help="Number of episodes.")
     parser.add_argument(
+        "--cargo-preset",
+        type=str,
+        default="auto",
+        choices=["auto", "L", "T", "U"],
+        help="Cargo shape (auto = read from checkpoint, default L).",
+    )
+    parser.add_argument(
+        "--num-agents",
+        type=int,
+        default=None,
+        help="Number of robots (default = checkpoint value, falls back to 4).",
+    )
+    parser.add_argument(
         "--max-episode-steps",
         type=int,
         default=1200,
@@ -197,6 +210,15 @@ def main() -> None:
     stage3_wall_width = train_args.get("stage3_wall_width", 42)
     stage4_gap_span = train_args.get("stage4_gap_span", 165.0)
     stage4_wall_width = train_args.get("stage4_wall_width", 34)
+
+    # Resolve cargo shape and number of agents (CLI overrides checkpoint).
+    ckpt_cargo_preset = train_args.get("fixed_cargo_preset", None) or "L"
+    if args.cargo_preset == "auto":
+        cargo_preset = ckpt_cargo_preset
+    else:
+        cargo_preset = args.cargo_preset
+    ckpt_num_agents = train_args.get("fixed_num_agents", None) or 4
+    num_agents = int(args.num_agents) if args.num_agents is not None else int(ckpt_num_agents)
     stage5_gap_height = train_args.get("stage5_gap_height", 200.0)
     stage5_wall_width = train_args.get("stage5_wall_width", 42)
 
@@ -260,6 +282,8 @@ def main() -> None:
         config=config,
         random_level=level,
         max_steps=args.max_episode_steps,
+        fixed_num_agents=num_agents,
+        fixed_cargo_preset=cargo_preset,
         goal_orientation_matching=goal_orientation_matching,
         goal_angle_tolerance=goal_angle_tolerance,
         random_goal_theta=random_goal_theta,
